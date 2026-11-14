@@ -1,0 +1,102 @@
+From f4503c62245bc8e914ea452b6c95c16f20af8414 Mon Sep 17 00:00:00 2001
+From: Cryss0K <cristian.molina72@inacapmail.cl>
+Date: Sat, 14 Nov 2026 20:48:46 -0300
+Subject: [PATCH 1/3] chore(repo): configurar reglas de linguist, gitignore y
+ plantilla de entorno
+
+---
+ .env.example   | 28 ++++++++++++++++++++++++++++
+ .gitattributes |  2 ++
+ .gitignore     | 36 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 66 insertions(+)
+ create mode 100644 .env.example
+ create mode 100644 .gitattributes
+ create mode 100644 .gitignore
+
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..e842965
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,28 @@
++# Copiar a .env (ignorado por git) y ajustar. Todos los valores tienen default en docker-compose.yml.
++
++# --- MS SQL Server 2022 ---
++MSSQL_SA_PASSWORD=Banking#Strong2026
++# Login de minimo privilegio usado por Spring Boot (evitar comillas simples en el valor)
++APP_DB_PASSWORD=App#Banking2026
++
++# --- PostgreSQL 16 (auditoria) ---
++POSTGRES_DB=audit_db
++POSTGRES_USER=audit_user
++POSTGRES_PASSWORD=Audit#Pg2026
++
++# --- Redis 7 ---
++REDIS_PASSWORD=Redis#Cache2026
++
++# --- RabbitMQ ---
++RABBITMQ_DEFAULT_USER=banking
++RABBITMQ_DEFAULT_PASS=Rabbit#Bus2026
++
++# --- Seguridad ---
++JWT_SECRET=cambia-este-secreto-por-uno-de-al-menos-32-caracteres-aleatorios
++
++# --- Observabilidad (archivos dentro de ./monitoring/) ---
++# Archivo de config del OTel Collector heredado del blueprint. AJUSTAR al nombre real.
++OTEL_COLLECTOR_CONFIG_FILE=otel-collector-config.yaml
++# prometheus.banking.yml = config con targets del banking; usar prometheus.yml para la heredada tal cual.
++PROMETHEUS_CONFIG_FILE=prometheus.banking.yml
++GRAFANA_ADMIN_PASSWORD=Grafana#Obs2026
+diff --git a/.gitattributes b/.gitattributes
+new file mode 100644
+index 0000000..7d5924e
+--- /dev/null
++++ b/.gitattributes
+@@ -0,0 +1,2 @@
++patches/** linguist-generated=true
++*.sh linguist-vendored
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..9edb759
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,36 @@
++# --- Scripts generadores de fases (efimeros) ---
++generate_fase_*.sh
++
++# --- Secretos y entorno ---
++.env
++
++# --- Logs ---
++*.log
++
++# --- Node / Angular ---
++node_modules/
++dist/
++.angular/
++
++# --- Java / Maven ---
++target/
++*.class
++
++# --- Python ---
++__pycache__/
++*.pyc
++.venv/
++.pytest_cache/
++
++# --- Cobertura de pruebas ---
++coverage/
++htmlcov/
++.coverage
++coverage.xml
++*.lcov
++
++# --- IDEs / SO ---
++.idea/
++.vscode/
++*.iml
++.DS_Store
+-- 
+2.55.0.windows.2
+
