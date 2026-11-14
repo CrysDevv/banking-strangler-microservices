@@ -1,0 +1,502 @@
+From f96b921b3b3d7e8946fb07c3f478b39adc0a535e Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sat, 14 Nov 2026 20:48:46 -0300
+Subject: [PATCH 2/3] feat(bd): agregar esquema de ms sql server, tabla outbox
+ y procedimientos almacenados
+
+---
+ db/mssql/init-db.sh            |  15 +++
+ db/mssql/schema.sql            | 194 +++++++++++++++++++++++++++++++++
+ db/mssql/seed.sql              |  65 +++++++++++
+ db/mssql/stored_procedures.sql | 149 +++++++++++++++++++++++++
+ db/postgres/init.sql           |  27 +++++
+ 5 files changed, 450 insertions(+)
+ create mode 100644 db/mssql/init-db.sh
+ create mode 100644 db/mssql/schema.sql
+ create mode 100644 db/mssql/seed.sql
+ create mode 100644 db/mssql/stored_procedures.sql
+ create mode 100644 db/postgres/init.sql
+
+diff --git a/db/mssql/init-db.sh b/db/mssql/init-db.sh
+new file mode 100644
+index 0000000..63dea72
+--- /dev/null
++++ b/db/mssql/init-db.sh
+@@ -0,0 +1,15 @@
++#!/bin/bash
++# Ejecutado por el contenedor init-db (imagen mssql/server:2022 que incluye sqlcmd).
++# -I: QUOTED_IDENTIFIER ON (indices filtrados) | -b: abortar ante error | -f 65001: UTF-8
++set -euo pipefail
++
++SQLCMD=/opt/mssql-tools18/bin/sqlcmd
++
++for f in schema stored_procedures seed; do
++  echo "[init-db] Ejecutando ${f}.sql ..."
++  "$SQLCMD" -S mssql -U sa -P "${MSSQL_SA_PASSWORD}" -C -I -b -f 65001 \
++            -v APP_DB_PASSWORD="${APP_DB_PASSWORD}" \
++            -i "/scripts/${f}.sql"
++done
++
++echo "[init-db] Base BankingCore lista."
+diff --git a/db/mssql/schema.sql b/db/mssql/schema.sql
+new file mode 100644
+index 0000000..ac4c963
+--- /dev/null
++++ b/db/mssql/schema.sql
+@@ -0,0 +1,194 @@
++/* =============================================================================
++   schema.sql - MS SQL Server 2022 - BankingCore
++   Idempotente. Requiere sqlcmd con: -I (QUOTED_IDENTIFIER ON), -f 65001 (UTF-8)
++   y la variable -v APP_DB_PASSWORD="..." (login de minimo privilegio).
++   Codigos de error de dominio (THROW) usados por sp_EjecutarTransferencia:
++     50001 monto invalido | 50002 origen=destino | 50003 origen inexistente
++     50004 destino inexistente | 50005 origen no activa | 50006 destino no activa
++     50007 monedas distintas | 50008 saldo insuficiente
++     50009 conflicto de idempotencia | 50010 idempotency key ausente
++   ============================================================================= */
++SET NOCOUNT ON;
++GO
++
++IF DB_ID(N'BankingCore') IS NULL
++BEGIN
++    CREATE DATABASE BankingCore;
++END
++GO
++
++IF EXISTS (SELECT 1 FROM sys.databases WHERE name = N'BankingCore' AND is_read_committed_snapshot_on = 0)
++BEGIN
++    ALTER DATABASE BankingCore SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
++END
++GO
++
++/* Login de aplicacion (minimo privilegio): lectura directa, escritura solo via SP */
++IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'banking_app')
++BEGIN
++    CREATE LOGIN banking_app
++        WITH PASSWORD = N'$(APP_DB_PASSWORD)', CHECK_POLICY = OFF, DEFAULT_DATABASE = BankingCore;
++END
++GO
++
++USE BankingCore;
++GO
++
++IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'banking_app')
++BEGIN
++    CREATE USER banking_app FOR LOGIN banking_app WITH DEFAULT_SCHEMA = dbo;
++END
++GO
++
++/* ------------------------- RUT chileno (modulo 11) ------------------------- */
++CREATE OR ALTER FUNCTION dbo.fn_CalcularDvRut (@Cuerpo INT)
++RETURNS CHAR(1)
++AS
++BEGIN
++    DECLARE @Suma INT = 0, @Mult INT = 2, @N INT = @Cuerpo, @R INT;
++    WHILE @N > 0
++    BEGIN
++        SET @Suma = @Suma + (@N % 10) * @Mult;
++        SET @N    = @N / 10;
++        SET @Mult = CASE WHEN @Mult = 7 THEN 2 ELSE @Mult + 1 END;
++    END
++    SET @R = 11 - (@Suma % 11);
++    RETURN CASE @R WHEN 11 THEN '0' WHEN 10 THEN 'K' ELSE CAST(@R AS CHAR(1)) END;
++END
++GO
++
++/* Formato normalizado esperado: cuerpo-DV, sin puntos (ej. 11222333-K) */
++CREATE OR ALTER FUNCTION dbo.fn_ValidarRut (@Rut VARCHAR(12))
++RETURNS BIT
++AS
++BEGIN
++    IF @Rut IS NULL RETURN 0;
++    DECLARE @Pos INT = CHARINDEX('-', @Rut);
++    IF @Pos < 2 RETURN 0;
++    IF LEN(@Rut) <> @Pos + 1 RETURN 0;
++    DECLARE @Cuerpo VARCHAR(12) = LEFT(@Rut, @Pos - 1);
++    DECLARE @Dv CHAR(1) = UPPER(SUBSTRING(@Rut, @Pos + 1, 1));
++    IF @Cuerpo LIKE '%[^0-9]%' RETURN 0;
++    IF LEN(@Cuerpo) NOT BETWEEN 7 AND 8 RETURN 0;
++    RETURN CASE WHEN dbo.fn_CalcularDvRut(CAST(@Cuerpo AS INT)) = @Dv THEN 1 ELSE 0 END;
++END
++GO
++
++/* ------------------------------- Clientes ---------------------------------- */
++IF OBJECT_ID(N'dbo.Clientes', N'U') IS NULL
++BEGIN
++    CREATE TABLE dbo.Clientes
++    (
++        ClienteId      BIGINT        IDENTITY(1,1) NOT NULL CONSTRAINT PK_Clientes PRIMARY KEY,
++        Rut            VARCHAR(10)   NOT NULL CONSTRAINT UQ_Clientes_Rut UNIQUE
++                                     CONSTRAINT CK_Clientes_Rut CHECK (dbo.fn_ValidarRut(Rut) = 1),
++        Nombre         NVARCHAR(150) NOT NULL,
++        Email          VARCHAR(150)  NOT NULL CONSTRAINT UQ_Clientes_Email UNIQUE,
++        Telefono       VARCHAR(20)   NULL,
++        FechaCreacion  DATETIME2(3)  NOT NULL CONSTRAINT DF_Clientes_Fecha DEFAULT SYSUTCDATETIME()
++    );
++END
++GO
++
++/* -------------------------------- Cuentas ---------------------------------- */
++IF OBJECT_ID(N'dbo.Cuentas', N'U') IS NULL
++BEGIN
++    CREATE TABLE dbo.Cuentas
++    (
++        CuentaId       BIGINT        IDENTITY(1,1) NOT NULL CONSTRAINT PK_Cuentas PRIMARY KEY,
++        NumeroCuenta   VARCHAR(20)   NOT NULL CONSTRAINT UQ_Cuentas_Numero UNIQUE
++                                     CONSTRAINT CK_Cuentas_Numero CHECK (NumeroCuenta NOT LIKE '%[^0-9]%'),
++        ClienteId      BIGINT        NOT NULL CONSTRAINT FK_Cuentas_Clientes REFERENCES dbo.Clientes (ClienteId),
++        Tipo           VARCHAR(10)   NOT NULL CONSTRAINT CK_Cuentas_Tipo   CHECK (Tipo   IN ('CORRIENTE','VISTA','AHORRO')),
++        Moneda         CHAR(3)       NOT NULL CONSTRAINT DF_Cuentas_Moneda DEFAULT 'CLP'
++                                     CONSTRAINT CK_Cuentas_Moneda CHECK (Moneda IN ('CLP','USD')),
++        Saldo          DECIMAL(18,2) NOT NULL CONSTRAINT DF_Cuentas_Saldo  DEFAULT 0
++                                     CONSTRAINT CK_Cuentas_Saldo CHECK (Saldo >= 0),
++        Estado         VARCHAR(10)   NOT NULL CONSTRAINT DF_Cuentas_Estado DEFAULT 'ACTIVA'
++                                     CONSTRAINT CK_Cuentas_Estado CHECK (Estado IN ('ACTIVA','BLOQUEADA','CERRADA')),
++        RowVer         ROWVERSION    NOT NULL,   -- concurrencia optimista (JPA @Version / lecturas condicionales)
++        FechaCreacion  DATETIME2(3)  NOT NULL CONSTRAINT DF_Cuentas_Fecha DEFAULT SYSUTCDATETIME()
++    );
++    CREATE INDEX IX_Cuentas_Cliente ON dbo.Cuentas (ClienteId);
++END
++GO
++
++/* ----------------------------- Transferencias ------------------------------ */
++IF OBJECT_ID(N'dbo.Transferencias', N'U') IS NULL
++BEGIN
++    CREATE TABLE dbo.Transferencias
++    (
++        TransferenciaId  UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_Transferencias PRIMARY KEY,
++        IdempotencyKey   VARCHAR(64)      NOT NULL CONSTRAINT UQ_Transferencias_Idem UNIQUE,
++        CuentaOrigenId   BIGINT           NOT NULL CONSTRAINT FK_Transf_Origen  REFERENCES dbo.Cuentas (CuentaId),
++        CuentaDestinoId  BIGINT           NOT NULL CONSTRAINT FK_Transf_Destino REFERENCES dbo.Cuentas (CuentaId),
++        Monto            DECIMAL(18,2)    NOT NULL CONSTRAINT CK_Transf_Monto CHECK (Monto > 0),
++        Moneda           CHAR(3)          NOT NULL,
++        Glosa            NVARCHAR(200)    NULL,
++        Estado           VARCHAR(12)      NOT NULL CONSTRAINT CK_Transf_Estado CHECK (Estado IN ('COMPLETADA','RECHAZADA')),
++        CorrelationId    VARCHAR(64)      NULL,
++        FechaCreacion    DATETIME2(3)     NOT NULL CONSTRAINT DF_Transf_Fecha DEFAULT SYSUTCDATETIME(),
++        CONSTRAINT CK_Transf_CuentasDistintas CHECK (CuentaOrigenId <> CuentaDestinoId)
++    );
++END
++GO
++
++/* ------------------------------ Movimientos -------------------------------- */
++IF OBJECT_ID(N'dbo.Movimientos', N'U') IS NULL
++BEGIN
++    CREATE TABLE dbo.Movimientos
++    (
++        MovimientoId     BIGINT           IDENTITY(1,1) NOT NULL CONSTRAINT PK_Movimientos PRIMARY KEY,
++        TransferenciaId  UNIQUEIDENTIFIER NULL CONSTRAINT FK_Mov_Transferencia REFERENCES dbo.Transferencias (TransferenciaId),
++        CuentaId         BIGINT           NOT NULL CONSTRAINT FK_Mov_Cuenta REFERENCES dbo.Cuentas (CuentaId),
++        Tipo             VARCHAR(7)       NOT NULL CONSTRAINT CK_Mov_Tipo CHECK (Tipo IN ('DEBITO','CREDITO')),
++        Monto            DECIMAL(18,2)    NOT NULL CONSTRAINT CK_Mov_Monto CHECK (Monto > 0),
++        SaldoPosterior   DECIMAL(18,2)    NOT NULL,
++        Glosa            NVARCHAR(200)    NULL,
++        CorrelationId    VARCHAR(64)      NULL,
++        FechaMovimiento  DATETIME2(3)     NOT NULL CONSTRAINT DF_Mov_Fecha DEFAULT SYSUTCDATETIME()
++    );
++    CREATE INDEX IX_Movimientos_Cuenta_Fecha
++        ON dbo.Movimientos (CuentaId, FechaMovimiento DESC)
++        INCLUDE (Tipo, Monto, SaldoPosterior, Glosa);
++    CREATE INDEX IX_Movimientos_Transferencia ON dbo.Movimientos (TransferenciaId) WHERE TransferenciaId IS NOT NULL;
++END
++GO
++
++/* ----------------------------- OutboxEventos ------------------------------- */
++IF OBJECT_ID(N'dbo.OutboxEventos', N'U') IS NULL
++BEGIN
++    CREATE TABLE dbo.OutboxEventos
++    (
++        SecuenciaId     BIGINT           IDENTITY(1,1) NOT NULL CONSTRAINT PK_OutboxEventos PRIMARY KEY,
++        EventoId        UNIQUEIDENTIFIER NOT NULL CONSTRAINT UQ_Outbox_EventoId UNIQUE
++                                         CONSTRAINT DF_Outbox_EventoId DEFAULT NEWID(),
++        AggregateType   VARCHAR(50)      NOT NULL,
++        AggregateId     VARCHAR(64)      NOT NULL,
++        EventType       VARCHAR(100)     NOT NULL,
++        Payload         NVARCHAR(MAX)    NOT NULL CONSTRAINT CK_Outbox_Payload CHECK (ISJSON(Payload) = 1),
++        CorrelationId   VARCHAR(64)      NULL,
++        Estado          VARCHAR(10)      NOT NULL CONSTRAINT DF_Outbox_Estado DEFAULT 'PENDIENTE'
++                                         CONSTRAINT CK_Outbox_Estado CHECK (Estado IN ('PENDIENTE','PUBLICADO','FALLIDO')),
++        Intentos        INT              NOT NULL CONSTRAINT DF_Outbox_Intentos DEFAULT 0,
++        UltimoError     NVARCHAR(1000)   NULL,
++        FechaCreacion   DATETIME2(3)     NOT NULL CONSTRAINT DF_Outbox_Fecha DEFAULT SYSUTCDATETIME(),
++        FechaPublicado  DATETIME2(3)     NULL
++    );
++    -- Indice filtrado: el OutboxPoller (UPDLOCK, READPAST) solo recorre pendientes.
++    CREATE INDEX IX_Outbox_Pendientes
++        ON dbo.OutboxEventos (SecuenciaId)
++        INCLUDE (EventoId, AggregateType, AggregateId, EventType, CorrelationId, Intentos)
++        WHERE Estado = 'PENDIENTE';
++END
++GO
++
++/* ------------- Permisos de minimo privilegio para banking_app --------------
++   Escrituras sobre Cuentas/Movimientos/Transferencias/Outbox(insert) ocurren
++   solo dentro de dbo.sp_EjecutarTransferencia (ownership chaining en dbo). */
++GRANT SELECT ON dbo.Clientes        TO banking_app;
++GRANT SELECT ON dbo.Cuentas         TO banking_app;
++GRANT SELECT ON dbo.Movimientos     TO banking_app;
++GRANT SELECT ON dbo.Transferencias  TO banking_app;
++GRANT SELECT, UPDATE, DELETE ON dbo.OutboxEventos TO banking_app;
++GO
+diff --git a/db/mssql/seed.sql b/db/mssql/seed.sql
+new file mode 100644
+index 0000000..a6f600d
+--- /dev/null
++++ b/db/mssql/seed.sql
+@@ -0,0 +1,65 @@
++/* =============================================================================
++   seed.sql - Datos semilla (idempotente: solo corre si Clientes esta vacia)
++   Los RUT se generan con dbo.fn_CalcularDvRut => siempre son validos.
++   Escenarios de prueba incluidos: saldo bajo, cuenta BLOQUEADA, cuenta USD.
++   ============================================================================= */
++USE BankingCore;
++GO
++
++IF NOT EXISTS (SELECT 1 FROM dbo.Clientes)
++BEGIN
++    SET NOCOUNT ON;
++
++    INSERT dbo.Clientes (Rut, Nombre, Email, Telefono)
++    SELECT CONCAT(v.Cuerpo, '-', dbo.fn_CalcularDvRut(v.Cuerpo)), v.Nombre, v.Email, v.Telefono
++      FROM (VALUES
++        (11222333, N'María Fernanda González Soto',    'maria.gonzalez@ejemplo.cl',   '+56911110001'),
++        (15678901, N'Juan Pablo Muñoz Araya',          'juan.munoz@ejemplo.cl',       '+56911110002'),
++        (17890123, N'Camila Andrea Rojas Pizarro',     'camila.rojas@ejemplo.cl',     '+56911110003'),
++        (19456789, N'Diego Alejandro Fuentes Vera',    'diego.fuentes@ejemplo.cl',    '+56911110004'),
++        (20123456, N'Valentina Ignacia Contreras Díaz','valentina.contreras@ejemplo.cl','+56911110005'),
++        (8765432,  N'Sergio Antonio Pérez Lagos',      'sergio.perez@ejemplo.cl',     '+56911110006'),
++        (12987654, N'Carolina Beatriz Núñez Tapia',    'carolina.nunez@ejemplo.cl',   '+56911110007'),
++        (22333444, N'Matías Esteban Silva Orellana',   'matias.silva@ejemplo.cl',     '+56911110008'),
++        (76123456, N'Comercial Los Andes SpA',         'tesoreria@losandes.cl',       '+56222220009')
++      ) AS v (Cuerpo, Nombre, Email, Telefono);
++
++    INSERT dbo.Cuentas (NumeroCuenta, ClienteId, Tipo, Moneda, Saldo, Estado)
++    SELECT v.Numero, c.ClienteId, v.Tipo, v.Moneda, v.Saldo, v.Estado
++      FROM (VALUES
++        ('0000100001', 11222333, 'CORRIENTE', 'CLP',  5000000.00, 'ACTIVA'),
++        ('0000100002', 11222333, 'AHORRO',    'CLP', 12500000.00, 'ACTIVA'),
++        ('0000200001', 15678901, 'CORRIENTE', 'CLP',   850000.00, 'ACTIVA'),
++        ('0000300001', 17890123, 'VISTA',     'CLP',   250000.00, 'ACTIVA'),
++        ('0000400001', 19456789, 'CORRIENTE', 'CLP',  3200000.00, 'ACTIVA'),
++        ('0000500001', 20123456, 'AHORRO',    'CLP',  7800000.00, 'ACTIVA'),
++        ('0000600001', 8765432,  'VISTA',     'CLP',    15000.00, 'ACTIVA'),
++        ('0000700001', 12987654, 'CORRIENTE', 'CLP',  1000000.00, 'ACTIVA'),
++        ('0000800001', 22333444, 'CORRIENTE', 'CLP',  2400000.00, 'BLOQUEADA'),
++        ('0000900001', 76123456, 'CORRIENTE', 'CLP', 45000000.00, 'ACTIVA'),
++        ('0000900002', 76123456, 'CORRIENTE', 'USD',    10000.00, 'ACTIVA')
++      ) AS v (Numero, CuerpoRut, Tipo, Moneda, Saldo, Estado)
++      JOIN dbo.Clientes AS c
++        ON c.Rut = CONCAT(v.CuerpoRut, '-', dbo.fn_CalcularDvRut(v.CuerpoRut));
++
++    /* Deposito inicial: cuadra el saldo sembrado con el libro de movimientos */
++    INSERT dbo.Movimientos (TransferenciaId, CuentaId, Tipo, Monto, SaldoPosterior, Glosa, CorrelationId)
++    SELECT NULL, CuentaId, 'CREDITO', Saldo, Saldo, N'Depósito inicial', 'seed-init'
++      FROM dbo.Cuentas
++     WHERE Saldo > 0;
++
++    /* Transferencias historicas reales: generan Movimientos y eventos Outbox PENDIENTES */
++    EXEC dbo.sp_EjecutarTransferencia @IdempotencyKey = 'seed-tx-001', @CuentaOrigen = '0000100001', @CuentaDestino = '0000200001', @Monto = 150000,  @Glosa = N'Pago arriendo',          @CorrelationId = 'seed-0001';
++    EXEC dbo.sp_EjecutarTransferencia @IdempotencyKey = 'seed-tx-002', @CuentaOrigen = '0000200001', @CuentaDestino = '0000300001', @Monto = 45000,   @Glosa = N'Transferencia familiar', @CorrelationId = 'seed-0002';
++    EXEC dbo.sp_EjecutarTransferencia @IdempotencyKey = 'seed-tx-003', @CuentaOrigen = '0000900001', @CuentaDestino = '0000500001', @Monto = 1200000, @Glosa = N'Pago honorarios',       @CorrelationId = 'seed-0003';
++    EXEC dbo.sp_EjecutarTransferencia @IdempotencyKey = 'seed-tx-004', @CuentaOrigen = '0000500001', @CuentaDestino = '0000100002', @Monto = 300000,  @Glosa = N'Ahorro mensual',        @CorrelationId = 'seed-0004';
++    EXEC dbo.sp_EjecutarTransferencia @IdempotencyKey = 'seed-tx-005', @CuentaOrigen = '0000400001', @CuentaDestino = '0000700001', @Monto = 80000,   @Glosa = N'Pago servicios',        @CorrelationId = 'seed-0005';
++
++    PRINT 'Seed completado: ' + CAST((SELECT COUNT(*) FROM dbo.Clientes)    AS VARCHAR(10)) + ' clientes, '
++                              + CAST((SELECT COUNT(*) FROM dbo.Cuentas)     AS VARCHAR(10)) + ' cuentas, '
++                              + CAST((SELECT COUNT(*) FROM dbo.Movimientos) AS VARCHAR(10)) + ' movimientos, '
++                              + CAST((SELECT COUNT(*) FROM dbo.OutboxEventos) AS VARCHAR(10)) + ' eventos outbox.';
++END
++ELSE
++    PRINT 'Seed omitido: la base ya contiene datos.';
++GO
+diff --git a/db/mssql/stored_procedures.sql b/db/mssql/stored_procedures.sql
+new file mode 100644
+index 0000000..1550921
+--- /dev/null
++++ b/db/mssql/stored_procedures.sql
+@@ -0,0 +1,149 @@
++/* =============================================================================
++   stored_procedures.sql - sp_EjecutarTransferencia
++   - Aislamiento SERIALIZABLE (alcance: solo dentro del procedimiento).
++   - Bloqueo de cuentas en orden determinista (NumeroCuenta ascendente) para
++     evitar deadlocks entre transferencias cruzadas (A->B vs B->A).
++   - Idempotencia por IdempotencyKey (reintentos devuelven el resultado original).
++   - Escribe Transferencias + 2 Movimientos + 1 OutboxEvento en UNA transaccion
++     (Transactional Outbox).
++   - Errores de dominio via THROW 500xx (ver schema.sql). Ante 1205 (deadlock)
++     el llamador debe reintentar.
++   ============================================================================= */
++USE BankingCore;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.sp_EjecutarTransferencia
++    @IdempotencyKey  VARCHAR(64),
++    @CuentaOrigen    VARCHAR(20),
++    @CuentaDestino   VARCHAR(20),
++    @Monto           DECIMAL(18,2),
++    @Glosa           NVARCHAR(200) = NULL,
++    @CorrelationId   VARCHAR(64)   = NULL
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SET XACT_ABORT ON;
++    SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
++
++    /* ---- Validaciones de entrada (sin transaccion abierta) ---- */
++    IF @IdempotencyKey IS NULL OR LTRIM(RTRIM(@IdempotencyKey)) = ''
++        THROW 50010, N'La clave de idempotencia es obligatoria.', 1;
++    IF @Monto IS NULL OR @Monto <= 0
++        THROW 50001, N'El monto debe ser mayor que cero.', 1;
++    IF @CuentaOrigen IS NULL OR @CuentaDestino IS NULL OR @CuentaOrigen = @CuentaDestino
++        THROW 50002, N'La cuenta de origen y destino deben ser distintas.', 1;
++
++    DECLARE @TransferenciaId UNIQUEIDENTIFIER = NEWID();
++    DECLARE @Ahora           DATETIME2(3)     = SYSUTCDATETIME();
++    DECLARE @OrigenId BIGINT, @DestinoId BIGINT, @Tmp BIGINT;
++    DECLARE @SaldoOrigen DECIMAL(18,2), @SaldoDestino DECIMAL(18,2);
++    DECLARE @EstadoOrigen VARCHAR(10), @EstadoDestino VARCHAR(10);
++    DECLARE @MonedaOrigen CHAR(3), @MonedaDestino CHAR(3);
++    DECLARE @Primero VARCHAR(20), @Segundo VARCHAR(20);
++    DECLARE @ExId UNIQUEIDENTIFIER, @ExMonto DECIMAL(18,2), @ExOrigenId BIGINT, @ExDestinoId BIGINT;
++    DECLARE @Payload NVARCHAR(MAX);
++
++    BEGIN TRY
++        BEGIN TRANSACTION;
++
++        /* ---- Idempotencia: lock de rango sobre la clave ---- */
++        SELECT @ExId = t.TransferenciaId, @ExMonto = t.Monto,
++               @ExOrigenId = t.CuentaOrigenId, @ExDestinoId = t.CuentaDestinoId
++          FROM dbo.Transferencias AS t WITH (UPDLOCK, HOLDLOCK)
++         WHERE t.IdempotencyKey = @IdempotencyKey;
++
++        IF @ExId IS NOT NULL
++        BEGIN
++            IF @ExMonto <> @Monto
++               OR NOT EXISTS (SELECT 1
++                                FROM dbo.Cuentas AS co, dbo.Cuentas AS cd
++                               WHERE co.CuentaId = @ExOrigenId  AND co.NumeroCuenta = @CuentaOrigen
++                                 AND cd.CuentaId = @ExDestinoId AND cd.NumeroCuenta = @CuentaDestino)
++                THROW 50009, N'La clave de idempotencia ya fue usada con parametros distintos.', 1;
++
++            COMMIT TRANSACTION;
++
++            SELECT t.TransferenciaId,
++                   t.Estado,
++                   (SELECT m.SaldoPosterior FROM dbo.Movimientos m WHERE m.TransferenciaId = t.TransferenciaId AND m.Tipo = 'DEBITO')  AS SaldoOrigen,
++                   (SELECT m.SaldoPosterior FROM dbo.Movimientos m WHERE m.TransferenciaId = t.TransferenciaId AND m.Tipo = 'CREDITO') AS SaldoDestino,
++                   CAST(1 AS BIT) AS Replay,
++                   t.FechaCreacion
++              FROM dbo.Transferencias AS t
++             WHERE t.TransferenciaId = @ExId;
++            RETURN;
++        END
++
++        /* ---- Bloqueo ordenado de ambas cuentas (previene deadlocks) ---- */
++        SET @Primero = CASE WHEN @CuentaOrigen < @CuentaDestino THEN @CuentaOrigen  ELSE @CuentaDestino END;
++        SET @Segundo = CASE WHEN @CuentaOrigen < @CuentaDestino THEN @CuentaDestino ELSE @CuentaOrigen  END;
++
++        SELECT @Tmp = CuentaId FROM dbo.Cuentas WITH (UPDLOCK, HOLDLOCK) WHERE NumeroCuenta = @Primero;
++        SELECT @Tmp = CuentaId FROM dbo.Cuentas WITH (UPDLOCK, HOLDLOCK) WHERE NumeroCuenta = @Segundo;
++
++        SELECT @OrigenId = CuentaId, @SaldoOrigen = Saldo, @EstadoOrigen = Estado, @MonedaOrigen = Moneda
++          FROM dbo.Cuentas WHERE NumeroCuenta = @CuentaOrigen;
++        SELECT @DestinoId = CuentaId, @SaldoDestino = Saldo, @EstadoDestino = Estado, @MonedaDestino = Moneda
++          FROM dbo.Cuentas WHERE NumeroCuenta = @CuentaDestino;
++
++        IF @OrigenId  IS NULL THROW 50003, N'La cuenta de origen no existe.', 1;
++        IF @DestinoId IS NULL THROW 50004, N'La cuenta de destino no existe.', 1;
++        IF @EstadoOrigen  <> 'ACTIVA' THROW 50005, N'La cuenta de origen no esta activa.', 1;
++        IF @EstadoDestino <> 'ACTIVA' THROW 50006, N'La cuenta de destino no esta activa.', 1;
++        IF @MonedaOrigen  <> @MonedaDestino THROW 50007, N'Las cuentas operan en monedas distintas.', 1;
++        IF @SaldoOrigen < @Monto THROW 50008, N'Saldo insuficiente en la cuenta de origen.', 1;
++
++        SET @SaldoOrigen  = @SaldoOrigen  - @Monto;
++        SET @SaldoDestino = @SaldoDestino + @Monto;
++
++        UPDATE dbo.Cuentas SET Saldo = @SaldoOrigen  WHERE CuentaId = @OrigenId;
++        UPDATE dbo.Cuentas SET Saldo = @SaldoDestino WHERE CuentaId = @DestinoId;
++
++        INSERT dbo.Transferencias
++            (TransferenciaId, IdempotencyKey, CuentaOrigenId, CuentaDestinoId, Monto, Moneda, Glosa, Estado, CorrelationId, FechaCreacion)
++        VALUES
++            (@TransferenciaId, @IdempotencyKey, @OrigenId, @DestinoId, @Monto, @MonedaOrigen, @Glosa, 'COMPLETADA', @CorrelationId, @Ahora);
++
++        INSERT dbo.Movimientos
++            (TransferenciaId, CuentaId, Tipo, Monto, SaldoPosterior, Glosa, CorrelationId, FechaMovimiento)
++        VALUES
++            (@TransferenciaId, @OrigenId,  'DEBITO',  @Monto, @SaldoOrigen,  @Glosa, @CorrelationId, @Ahora),
++            (@TransferenciaId, @DestinoId, 'CREDITO', @Monto, @SaldoDestino, @Glosa, @CorrelationId, @Ahora);
++
++        /* ---- Transactional Outbox: mismo commit que el cambio de estado ---- */
++        SET @Payload =
++        (
++            SELECT @TransferenciaId AS transferenciaId,
++                   @CuentaOrigen    AS cuentaOrigen,
++                   @CuentaDestino   AS cuentaDestino,
++                   @Monto           AS monto,
++                   @MonedaOrigen    AS moneda,
++                   @Glosa           AS glosa,
++                   @SaldoOrigen     AS saldoOrigen,
++                   @SaldoDestino    AS saldoDestino,
++                   @CorrelationId   AS correlationId,
++                   CONVERT(VARCHAR(30), @Ahora, 127) + 'Z' AS fecha
++            FOR JSON PATH, WITHOUT_ARRAY_WRAPPER
++        );
++
++        INSERT dbo.OutboxEventos (AggregateType, AggregateId, EventType, Payload, CorrelationId)
++        VALUES ('Transferencia', CAST(@TransferenciaId AS VARCHAR(36)), 'TransferenciaRealizada', @Payload, @CorrelationId);
++
++        COMMIT TRANSACTION;
++
++        SELECT @TransferenciaId AS TransferenciaId,
++               CAST('COMPLETADA' AS VARCHAR(12)) AS Estado,
++               @SaldoOrigen  AS SaldoOrigen,
++               @SaldoDestino AS SaldoDestino,
++               CAST(0 AS BIT) AS Replay,
++               @Ahora AS FechaCreacion;
++    END TRY
++    BEGIN CATCH
++        IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;
++        THROW;
++    END CATCH
++END
++GO
++
++GRANT EXECUTE ON dbo.sp_EjecutarTransferencia TO banking_app;
++GO
+diff --git a/db/postgres/init.sql b/db/postgres/init.sql
+new file mode 100644
+index 0000000..a78d7e7
+--- /dev/null
++++ b/db/postgres/init.sql
+@@ -0,0 +1,27 @@
++-- Ejecutado automaticamente por la imagen postgres:16 en el primer arranque
++-- (base POSTGRES_DB ya creada). Esquema consumido por services/audit-fastapi (Fase 4).
++
++CREATE SEQUENCE IF NOT EXISTS seq_comprobante START 1;
++
++-- Bitacora de eventos recibidos. UNIQUE(event_id) = deduplicacion de mensajes at-least-once.
++CREATE TABLE IF NOT EXISTS auditoria_eventos (
++    id              BIGSERIAL    PRIMARY KEY,
++    event_id        UUID         NOT NULL UNIQUE,
++    event_type      VARCHAR(100) NOT NULL,
++    aggregate_id    VARCHAR(64)  NOT NULL,
++    correlation_id  VARCHAR(64),
++    payload         JSONB        NOT NULL,
++    recibido_en     TIMESTAMPTZ  NOT NULL DEFAULT now()
++);
++CREATE INDEX IF NOT EXISTS ix_auditoria_aggregate   ON auditoria_eventos (aggregate_id);
++CREATE INDEX IF NOT EXISTS ix_auditoria_recibido_en ON auditoria_eventos (recibido_en DESC);
++
++-- Comprobantes de transferencia (uno por transferencia).
++CREATE TABLE IF NOT EXISTS comprobantes (
++    comprobante_id   UUID        PRIMARY KEY,
++    transferencia_id UUID        NOT NULL UNIQUE,
++    numero           VARCHAR(20) NOT NULL UNIQUE,
++    hash_sha256      CHAR(64)    NOT NULL,
++    contenido        JSONB       NOT NULL,
++    emitido_en       TIMESTAMPTZ NOT NULL DEFAULT now()
++);
+-- 
+2.55.0.windows.2
+

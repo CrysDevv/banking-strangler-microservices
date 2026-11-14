@@ -1,0 +1,36 @@
+# --- Scripts generadores de fases (efimeros) ---
+generate_fase_*.sh
+
+# --- Secretos y entorno ---
+.env
+
+# --- Logs ---
+*.log
+
+# --- Node / Angular ---
+node_modules/
+dist/
+.angular/
+
+# --- Java / Maven ---
+target/
+*.class
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# --- Cobertura de pruebas ---
+coverage/
+htmlcov/
+.coverage
+coverage.xml
+*.lcov
+
+# --- IDEs / SO ---
+.idea/
+.vscode/
+*.iml
+.DS_Store
