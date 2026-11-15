@@ -1,0 +1,589 @@
+From eca3c84e83a855cf96319ccf8aaa2c7815ad8932 Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sat, 14 Nov 2026 22:37:05 -0300
+Subject: [PATCH] feat(bff): implementar BFF y Anti-Corruption Layer en NestJS
+ con Redis, Opossum y RFC 7807
+
+---
+ services/bff-nestjs/.env.example              |   7 ++
+ services/bff-nestjs/package.json              |  74 +++++++++++
+ services/bff-nestjs/src/app.module.ts         |  21 ++++
+ .../decorators/IsRutChileno.validator.ts      |  41 +++++++
+ .../common/filters/http-exception.filter.ts   |  41 +++++++
+ .../interceptors/correlation-id.middleware.ts |  16 +++
+ services/bff-nestjs/src/main.ts               |  15 +++
+ .../src/modules/banking/banking.controller.ts |  36 ++++++
+ .../src/modules/banking/banking.service.ts    | 116 ++++++++++++++++++
+ .../modules/banking/dto/transferencias.dto.ts |  26 ++++
+ .../src/modules/redis/redis.service.ts        |  32 +++++
+ services/bff-nestjs/test/banking.e2e-spec.ts  |  27 ++++
+ services/bff-nestjs/tsconfig.json             |  21 ++++
+ 13 files changed, 473 insertions(+)
+ create mode 100644 services/bff-nestjs/.env.example
+ create mode 100644 services/bff-nestjs/package.json
+ create mode 100644 services/bff-nestjs/src/app.module.ts
+ create mode 100644 services/bff-nestjs/src/common/decorators/IsRutChileno.validator.ts
+ create mode 100644 services/bff-nestjs/src/common/filters/http-exception.filter.ts
+ create mode 100644 services/bff-nestjs/src/common/interceptors/correlation-id.middleware.ts
+ create mode 100644 services/bff-nestjs/src/main.ts
+ create mode 100644 services/bff-nestjs/src/modules/banking/banking.controller.ts
+ create mode 100644 services/bff-nestjs/src/modules/banking/banking.service.ts
+ create mode 100644 services/bff-nestjs/src/modules/banking/dto/transferencias.dto.ts
+ create mode 100644 services/bff-nestjs/src/modules/redis/redis.service.ts
+ create mode 100644 services/bff-nestjs/test/banking.e2e-spec.ts
+ create mode 100644 services/bff-nestjs/tsconfig.json
+
+diff --git a/services/bff-nestjs/.env.example b/services/bff-nestjs/.env.example
+new file mode 100644
+index 0000000..08f7588
+--- /dev/null
++++ b/services/bff-nestjs/.env.example
+@@ -0,0 +1,7 @@
++NODE_ENV=production
++PORT=3000
++CORE_BASE_URL=http://core-springboot:8080
++REDIS_HOST=redis
++REDIS_PORT=6379
++REDIS_PASSWORD=Redis#Cache2026
++JWT_SECRET=cambia-este-secreto-por-uno-de-al-menos-32-caracteres-aleatorios
+diff --git a/services/bff-nestjs/package.json b/services/bff-nestjs/package.json
+new file mode 100644
+index 0000000..2dfdaec
+--- /dev/null
++++ b/services/bff-nestjs/package.json
+@@ -0,0 +1,74 @@
++{
++  "name": "bff-nestjs",
++  "version": "0.3.0",
++  "description": "BFF y Anti-Corruption Layer en NestJS + TypeScript",
++  "author": "Banking Strangler Team",
++  "private": true,
++  "license": "UNLICENSED",
++  "scripts": {
++    "prebuild": "rimraf dist",
++    "build": "nest build",
++    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
++    "start": "nest start",
++    "start:dev": "nest start --watch",
++    "start:debug": "nest start --debug --watch",
++    "start:prod": "node dist/main",
++    "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
++    "test": "jest",
++    "test:watch": "jest --watch",
++    "test:cov": "jest --coverage",
++    "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
++    "test:e2e": "jest --config ./test/jest-e2e.json"
++  },
++  "dependencies": {
++    "@nestjs/common": "^10.3.0",
++    "@nestjs/config": "^3.2.0",
++    "@nestjs/core": "^10.3.0",
++    "@nestjs/mapped-types": "^2.0.5",
++    "@nestjs/platform-express": "^10.3.0",
++    "@nestjs/terminus": "^10.2.0",
++    "axios": "^1.6.8",
++    "class-validator": "^0.14.1",
++    "class-transformer": "^0.5.1",
++    "ioredis": "^5.4.1",
++    "opossum": "^8.1.4",
++    "reflect-metadata": "^0.2.1",
++    "rxjs": "^7.8.1"
++  },
++  "devDependencies": {
++    "@nestjs/cli": "^10.3.0",
++    "@nestjs/schematics": "^10.3.0",
++    "@nestjs/testing": "^10.3.0",
++    "@types/express": "^4.17.21",
++    "@types/jest": "^29.5.11",
++    "@types/node": "^20.11.0",
++    "@types/opossum": "^6.4.4",
++    "@types/supertest": "^6.0.2",
++    "@typescript-eslint/eslint-plugin": "^6.20.0",
++    "@typescript-eslint/parser": "^6.20.0",
++    "eslint": "^8.56.0",
++    "eslint-config-prettier": "^9.1.0",
++    "eslint-plugin-prettier": "^5.1.3",
++    "jest": "^29.7.0",
++    "prettier": "^3.2.4",
++    "rimraf": "^5.0.5",
++    "source-map-support": "^0.5.21",
++    "supertest": "^6.3.4",
++    "ts-jest": "^29.1.1",
++    "ts-loader": "^9.5.1",
++    "ts-node": "^10.9.2",
++    "tsconfig-paths": "^4.2.0",
++    "typescript": "^5.3.3"
++  },
++  "jest": {
++    "moduleFileExtensions": ["js", "json", "ts"],
++    "rootDir": "src",
++    "testRegex": ".*\\.spec\\.ts$",
++    "transform": {
++      "^.+\\.(t|j)s$": "ts-jest"
++    },
++    "collectCoverageFrom": ["**/*.(t|j)s"],
++    "coverageDirectory": "../coverage",
++    "testEnvironment": "node"
++  }
++}
+diff --git a/services/bff-nestjs/src/app.module.ts b/services/bff-nestjs/src/app.module.ts
+new file mode 100644
+index 0000000..0e2f175
+--- /dev/null
++++ b/services/bff-nestjs/src/app.module.ts
+@@ -0,0 +1,21 @@
++import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
++import { ConfigModule } from '@nestjs/config';
++import { TerminusModule } from '@nestjs/terminus';
++import { RedisService } from './modules/redis/redis.service';
++import { BankingBffService } from './modules/banking/banking.service';
++import { BankingBffController } from './modules/banking/banking.controller';
++import { CorrelationIdMiddleware } from './common/interceptors/correlation-id.middleware';
++
++@Module({
++  imports: [
++    ConfigModule.forRoot({ isGlobal: true }),
++    TerminusModule,
++  ],
++  controllers: [BankingBffController],
++  providers: [RedisService, BankingBffService],
++})
++export class AppModule implements NestModule {
++  configure(consumer: MiddlewareConsumer) {
++    consumer.apply(CorrelationIdMiddleware).forRoutes('*');
++  }
++}
+diff --git a/services/bff-nestjs/src/common/decorators/IsRutChileno.validator.ts b/services/bff-nestjs/src/common/decorators/IsRutChileno.validator.ts
+new file mode 100644
+index 0000000..d1730e1
+--- /dev/null
++++ b/services/bff-nestjs/src/common/decorators/IsRutChileno.validator.ts
+@@ -0,0 +1,41 @@
++import { registerDecorator, ValidationOptions, ValidationArguments } from 'class-validator';
++
++export function IsRutChileno(validationOptions?: ValidationOptions) {
++  return function (object: Object, propertyName: string) {
++    registerDecorator({
++      name: 'isRutChileno',
++      target: object.constructor,
++      propertyName: propertyName,
++      options: validationOptions,
++      validator: {
++        validate(value: any, args: ValidationArguments) {
++          if (typeof value !== 'string') return false;
++          const cleanRut = value.trim().toUpperCase();
++          const regex = /^([0-9]{7,8})-([0-9K])$/;
++          if (!regex.test(cleanRut)) return false;
++
++          const parts = cleanRut.split('-');
++          const cuerpo = parts[0];
++          const dv = parts[1];
++
++          let suma = 0;
++          let mult = 2;
++          for (let i = cuerpo.length - 1; i >= 0; i--) {
++            suma += parseInt(cuerpo.charAt(i), 10) * mult;
++            mult = mult === 7 ? 2 : mult + 1;
++          }
++          const res = 11 - (suma % 11);
++          let dvEsperado = '';
++          if (res === 11) dvEsperado = '0';
++          else if (res === 10) dvEsperado = 'K';
++          else dvEsperado = res.toString();
++
++          return dv === dvEsperado;
++        },
++        defaultMessage(args: ValidationArguments) {
++          return 'El formato o dígito verificador del RUT chileno es inválido (ej: 12345678-K).';
++        },
++      },
++    });
++  };
++}
+diff --git a/services/bff-nestjs/src/common/filters/http-exception.filter.ts b/services/bff-nestjs/src/common/filters/http-exception.filter.ts
+new file mode 100644
+index 0000000..4127dbf
+--- /dev/null
++++ b/services/bff-nestjs/src/common/filters/http-exception.filter.ts
+@@ -0,0 +1,41 @@
++import { ExceptionFilter, Catch, ArgumentsHost, HttpException, HttpStatus } from '@nestjs/common';
++import { Request, Response } from 'express';
++
++@Catch()
++export class HttpExceptionFilter implements ExceptionFilter {
++  catch(exception: unknown, host: ArgumentsHost) {
++    const ctx = host.switchToHttp();
++    const response = ctx.getResponse<Response>();
++    const request = ctx.getRequest<Request>();
++    const correlationId = request.headers['x-correlation-id'] || 'N/A';
++
++    let status = HttpStatus.INTERNAL_SERVER_ERROR;
++    let title = 'Error Interno del Servidor';
++    let detail = 'Ocurrió un error inesperado en el BFF.';
++    let errorCode = 'INTERNAL_ERROR';
++
++    if (exception instanceof HttpException) {
++      status = exception.getStatus();
++      const errorResponse: any = exception.getResponse();
++      title = exception.name;
++      detail = typeof errorResponse === 'object' && errorResponse.message ? errorResponse.message : exception.message;
++      errorCode = typeof errorResponse === 'object' && errorResponse.error ? errorResponse.error : 'HTTP_EXCEPTION';
++    } else if (exception instanceof Error) {
++      detail = exception.message;
++    }
++
++    const problemDetails = {
++      type: 'https://api.banking.com/errors/bff-error',
++      title: title,
++      status: status,
++      detail: Array.isArray(detail) ? detail.join(', ') : detail,
++      instance: request.url,
++      errorCode: errorCode,
++      correlationId: correlationId,
++      timestamp: new Date().toISOString(),
++    };
++
++    response.setHeader('Content-Type', 'application/problem+json');
++    response.status(status).json(problemDetails);
++  }
++}
+diff --git a/services/bff-nestjs/src/common/interceptors/correlation-id.middleware.ts b/services/bff-nestjs/src/common/interceptors/correlation-id.middleware.ts
+new file mode 100644
+index 0000000..f33dc4d
+--- /dev/null
++++ b/services/bff-nestjs/src/common/interceptors/correlation-id.middleware.ts
+@@ -0,0 +1,16 @@
++import { Injectable, NestMiddleware } from '@nestjs/common';
++import { Request, Response, NextFunction } from 'express';
++import { randomUUID } from 'crypto';
++
++@Injectable()
++export class CorrelationIdMiddleware implements NestMiddleware {
++  use(req: Request, res: Response, next: NextFunction) {
++    let correlationId = req.headers['x-correlation-id'];
++    if (!correlationId || Array.isArray(correlationId)) {
++      correlationId = randomUUID();
++    }
++    req.headers['x-correlation-id'] = correlationId;
++    res.setHeader('X-Correlation-ID', correlationId);
++    next();
++  }
++}
+diff --git a/services/bff-nestjs/src/main.ts b/services/bff-nestjs/src/main.ts
+new file mode 100644
+index 0000000..60729c5
+--- /dev/null
++++ b/services/bff-nestjs/src/main.ts
+@@ -0,0 +1,15 @@
++import { NestFactory } from '@nestjs/core';
++import { AppModule } from './app.module';
++import { ValidationPipe } from '@nestjs/common';
++import { HttpExceptionFilter } from './common/filters/http-exception.filter';
++
++async function bootstrap() {
++  const app = await NestFactory.create(AppModule);
++  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }));
++  app.useGlobalFilters(new HttpExceptionFilter());
++  
++  const port = process.env.PORT || 3000;
++  await app.listen(port);
++  console.log(`BFF NestJS ejecutándose en puerto ${port}`);
++}
++bootstrap();
+diff --git a/services/bff-nestjs/src/modules/banking/banking.controller.ts b/services/bff-nestjs/src/modules/banking/banking.controller.ts
+new file mode 100644
+index 0000000..a85c9e9
+--- /dev/null
++++ b/services/bff-nestjs/src/modules/banking/banking.controller.ts
+@@ -0,0 +1,36 @@
++import { Controller, Get, Post, Body, Param, Headers, Req } from '@nestjs/common';
++import { BankingBffService } from './banking.service';
++import { TransferenciaBffDto } from './dto/transferencias.dto';
++import { Request } from 'express';
++
++@Controller('api/v1/bff')
++export class BankingBffController {
++  constructor(private readonly bankingBffService: BankingBffService) {}
++
++  @Post('transferencias')
++  async ejecutarTransferencia(
++    @Body() dto: TransferenciaBffDto,
++    @Headers('x-correlation-id') correlationId: string,
++    @Headers('authorization') authHeader: string,
++  ) {
++    return await this.bankingBffService.ejecutarTransferencia(dto, correlationId, authHeader);
++  }
++
++  @Get('clientes/:clienteId/cuentas')
++  async listarCuentas(
++    @Param('clienteId') clienteId: number,
++    @Headers('x-correlation-id') correlationId: string,
++    @Headers('authorization') authHeader: string,
++  ) {
++    return await this.bankingBffService.obtenerCuentas(clienteId, correlationId, authHeader);
++  }
++
++  @Get('cuentas/:numeroCuenta/movimientos')
++  async listarMovimientos(
++    @Param('numeroCuenta') numeroCuenta: string,
++    @Headers('x-correlation-id') correlationId: string,
++    @Headers('authorization') authHeader: string,
++  ) {
++    return await this.bankingBffService.obtenerMovimientos(numeroCuenta, correlationId, authHeader);
++  }
++}
+diff --git a/services/bff-nestjs/src/modules/banking/banking.service.ts b/services/bff-nestjs/src/modules/banking/banking.service.ts
+new file mode 100644
+index 0000000..09c4919
+--- /dev/null
++++ b/services/bff-nestjs/src/modules/banking/banking.service.ts
+@@ -0,0 +1,116 @@
++import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
++import { ConfigService } from '@nestjs/config';
++import axios, { AxiosInstance } from 'axios';
++import * as CircuitBreaker from 'opossum';
++import { RedisService } from '../redis/redis.service';
++import { TransferenciaBffDto } from './dto/transferencias.dto';
++
++@Injectable()
++export class BankingBffService {
++  private readonly logger = new Logger(BankingBffService.name);
++  private readonly coreClient: AxiosInstance;
++  private readonly breaker: CircuitBreaker;
++
++  constructor(
++    private configService: ConfigService,
++    private redisService: RedisService,
++  ) {
++    const coreBaseUrl = this.configService.get<string>('CORE_BASE_URL', 'http://localhost:8080');
++    this.coreClient = axios.create({
++      baseURL: coreBaseUrl,
++      timeout: 5000,
++    });
++
++    const options = {
++      timeout: 6000,
++      errorThresholdPercentage: 50,
++      resetTimeout: 10000,
++    };
++
++    this.breaker = new CircuitBreaker(async (method, url, data, headers) => {
++      return await this.coreClient.request({ method, url, data, headers });
++    }, options);
++
++    this.breaker.fallback(() => {
++      throw new HttpException('El Core Bancario no se encuentra disponible (Circuit Breaker Abierto)', HttpStatus.SERVICE_UNAVAILABLE);
++    });
++  }
++
++  async ejecutarTransferencia(dto: TransferenciaBffDto, correlationId: string, authHeader: string) {
++    try {
++      const response = await this.breaker.fire(
++        'POST',
++        '/api/v1/banking/transferencias',
++        dto,
++        {
++          'X-Correlation-ID': correlationId,
++          'Authorization': authHeader,
++        }
++      );
++      return response.data;
++    } catch (error: any) {
++      this.logger.error(`Error ejecutando transferencia en core: ${error.message}`);
++      if (error.response) {
++        throw new HttpException(error.response.data, error.response.status);
++      }
++      throw error;
++    }
++  }
++
++  async obtenerCuentas(clienteId: number, correlationId: string, authHeader: string) {
++    const cacheKey = `banking:cliente:${clienteId}:cuentas`;
++    const cached = await this.redisService.get(cacheKey);
++    if (cached) {
++      this.logger.debug(`Cache hit para cuentas de cliente ${clienteId}`);
++      return JSON.parse(cached);
++    }
++
++    try {
++      const response = await this.breaker.fire(
++        'GET',
++        `/api/v1/banking/clientes/${clienteId}/cuentas`,
++        null,
++        {
++          'X-Correlation-ID': correlationId,
++          'Authorization': authHeader,
++        }
++      );
++      await this.redisService.set(cacheKey, JSON.stringify(response.data), 30);
++      return response.data;
++    } catch (error: any) {
++      this.logger.error(`Error obteniendo cuentas: ${error.message}`);
++      if (error.response) {
++        throw new HttpException(error.response.data, error.response.status);
++      }
++      throw error;
++    }
++  }
++
++  async obtenerMovimientos(numeroCuenta: string, correlationId: string, authHeader: string) {
++    const cacheKey = `banking:cuenta:${numeroCuenta}:movimientos`;
++    const cached = await this.redisService.get(cacheKey);
++    if (cached) {
++      return JSON.parse(cached);
++    }
++
++    try {
++      const response = await this.breaker.fire(
++        'GET',
++        `/api/v1/banking/cuentas/${numeroCuenta}/movimientos`,
++        null,
++        {
++          'X-Correlation-ID': correlationId,
++          'Authorization': authHeader,
++        }
++      );
++      await this.redisService.set(cacheKey, JSON.stringify(response.data), 15);
++      return response.data;
++    } catch (error: any) {
++      this.logger.error(`Error obteniendo movimientos: ${error.message}`);
++      if (error.response) {
++        throw new HttpException(error.response.data, error.response.status);
++      }
++      throw error;
++    }
++  }
++}
+diff --git a/services/bff-nestjs/src/modules/banking/dto/transferencias.dto.ts b/services/bff-nestjs/src/modules/banking/dto/transferencias.dto.ts
+new file mode 100644
+index 0000000..e69a325
+--- /dev/null
++++ b/services/bff-nestjs/src/modules/banking/dto/transferencias.dto.ts
+@@ -0,0 +1,26 @@
++import { IsString, IsNotEmpty, IsNumber, Min, MaxLength } from 'class-validator';
++
++export class TransferenciaBffDto {
++  @IsString()
++  @IsNotEmpty()
++  @MaxLength(64)
++  readonly idempotencyKey: string;
++
++  @IsString()
++  @IsNotEmpty()
++  @MaxLength(20)
++  readonly cuentaOrigen: string;
++
++  @IsString()
++  @IsNotEmpty()
++  @MaxLength(20)
++  readonly cuentaDestino: string;
++
++  @IsNumber()
++  @Min(0.01)
++  readonly monto: number;
++
++  @IsString()
++  @MaxLength(200)
++  readonly glosa?: string;
++}
+diff --git a/services/bff-nestjs/src/modules/redis/redis.service.ts b/services/bff-nestjs/src/modules/redis/redis.service.ts
+new file mode 100644
+index 0000000..62ae320
+--- /dev/null
++++ b/services/bff-nestjs/src/modules/redis/redis.service.ts
+@@ -0,0 +1,32 @@
++import { Injectable, OnModuleDestroy } from '@nestjs/common';
++import { ConfigService } from '@nestjs/config';
++import Redis from 'ioredis';
++
++@Injectable()
++export class RedisService implements OnModuleDestroy {
++  private readonly client: Redis;
++
++  constructor(private configService: ConfigService) {
++    this.client = new Redis({
++      host: this.configService.get<string>('REDIS_HOST', 'localhost'),
++      port: this.configService.get<number>('REDIS_PORT', 6379),
++      password: this.configService.get<string>('REDIS_PASSWORD', 'Redis#Cache2026'),
++    });
++  }
++
++  async get(key: string): Promise<string | null> {
++    return await this.client.get(key);
++  }
++
++  async set(key: string, value: string, ttlSeconds: number = 60): Promise<void> {
++    await this.client.set(key, value, 'EX', ttlSeconds);
++  }
++
++  async del(key: string): Promise<void> {
++    await this.client.del(key);
++  }
++
++  async onModuleDestroy() {
++    await this.client.quit();
++  }
++}
+diff --git a/services/bff-nestjs/test/banking.e2e-spec.ts b/services/bff-nestjs/test/banking.e2e-spec.ts
+new file mode 100644
+index 0000000..d6f325f
+--- /dev/null
++++ b/services/bff-nestjs/test/banking.e2e-spec.ts
+@@ -0,0 +1,27 @@
++import { Test, TestingModule } from '@nestjs/testing';
++import { INestApplication } from '@nestjs/common';
++import * as request from 'supertest';
++import { AppModule } from '../src/app.module';
++
++describe('BankingBffController (e2e)', () => {
++  let app: INestApplication;
++
++  beforeEach(async () => {
++    const moduleFixture: TestingModule = await Test.createTestingModule({
++      imports: [AppModule],
++    }).compile();
++
++    app = moduleFixture.createNestApplication();
++    await app.init();
++  });
++
++  afterEach(async () => {
++    await app.close();
++  });
++
++  it('/api/v1/bff/clientes/1/cuentas (GET) sin token debe fallar o retornar error', () => {
++    return request(app.getHttpServer())
++      .get('/api/v1/bff/clientes/1/cuentas')
++      .expect(500);
++  });
++});
+diff --git a/services/bff-nestjs/tsconfig.json b/services/bff-nestjs/tsconfig.json
+new file mode 100644
+index 0000000..a16496d
+--- /dev/null
++++ b/services/bff-nestjs/tsconfig.json
+@@ -0,0 +1,21 @@
++{
++  "compilerOptions": {
++    "module": "commonjs",
++    "declaration": true,
++    "removeComments": true,
++    "emitDecoratorMetadata": true,
++    "experimentalDecorators": true,
++    "allowSyntheticDefaultImports": true,
++    "target": "ES2022",
++    "sourceMap": true,
++    "outDir": "./dist",
++    "baseUrl": "./",
++    "incremental": true,
++    "skipLibCheck": true,
++    "strictNullChecks": false,
++    "noImplicitAny": false,
++    "strictBindCallApply": false,
++    "forceConsistentCasingInFileNames": false,
++    "noFallthroughCasesInSwitch": false
++  }
++}
+-- 
+2.55.0.windows.2
+
