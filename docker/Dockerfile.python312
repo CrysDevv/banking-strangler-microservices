@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # FastAPI (Python 3.12) - multi-stage endurecido.
-# Contexto de build: raíz del microservicio (requirements.txt y el paquete "app/").
+# Contexto de build: raíz del microservicio (requirements.txt y main.py).
 # Requiere: uvicorn en requirements.txt y dependencias disponibles como wheels
 # (el builder no incluye compiladores a propósito).
 # Uso: scripts/build-image.sh python312 <ruta-del-servicio> <imagen:tag>
@@ -39,7 +39,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:${PATH}" \
     APP_PORT=${APP_PORT} \
     HEALTH_PATH=/health \
-    APP_MODULE=app.main:app
+    APP_MODULE=main:app
 
 RUN apt-get update \
  && apt-get upgrade -y \
