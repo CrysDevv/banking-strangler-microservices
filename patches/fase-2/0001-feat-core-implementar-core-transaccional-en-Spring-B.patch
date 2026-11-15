@@ -1,0 +1,1052 @@
+From fd535b5b44f51fe4ef34593435ace47d33a6b568 Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sat, 14 Nov 2026 22:27:02 -0300
+Subject: [PATCH] feat(core): implementar core transaccional en Spring Boot
+ 3.3.2 con MS SQL Server y Outbox
+
+---
+ services/core-springboot/pom.xml              | 146 ++++++++++++++++++
+ .../banking/core/CoreSpringApplication.java   |  13 ++
+ .../core/config/CorrelationIdFilter.java      |  40 +++++
+ .../banking/core/config/RabbitMQConfig.java   |  32 ++++
+ .../core/controller/BankingController.java    |  42 +++++
+ .../java/com/banking/core/dto/CuentaDto.java  |  20 +++
+ .../com/banking/core/dto/MovimientoDto.java   |  24 +++
+ .../core/dto/TransferenciaRequest.java        |  31 ++++
+ .../core/dto/TransferenciaResponse.java       |  23 +++
+ .../exception/BankingDomainException.java     |  14 ++
+ .../exception/GlobalExceptionHandler.java     |  64 ++++++++
+ .../com/banking/core/model/OutboxEvento.java  |  50 ++++++
+ .../core/repository/OutboxRepository.java     |  19 +++
+ .../banking/core/security/SecurityConfig.java |  79 ++++++++++
+ .../banking/core/service/BankingService.java  | 112 ++++++++++++++
+ .../banking/core/service/OutboxPoller.java    |  65 ++++++++
+ .../src/main/resources/application.yml        |  42 +++++
+ .../BankingApplicationIntegrationTest.java    |  80 ++++++++++
+ 18 files changed, 896 insertions(+)
+ create mode 100644 services/core-springboot/pom.xml
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/CoreSpringApplication.java
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/config/CorrelationIdFilter.java
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/config/RabbitMQConfig.java
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/controller/BankingController.java
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/dto/CuentaDto.java
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/dto/MovimientoDto.java
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/dto/TransferenciaRequest.java
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/dto/TransferenciaResponse.java
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/exception/BankingDomainException.java
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/exception/GlobalExceptionHandler.java
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/model/OutboxEvento.java
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/repository/OutboxRepository.java
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/security/SecurityConfig.java
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/service/BankingService.java
+ create mode 100644 services/core-springboot/src/main/java/com/banking/core/service/OutboxPoller.java
+ create mode 100644 services/core-springboot/src/main/resources/application.yml
+ create mode 100644 services/core-springboot/src/test/java/com/banking/core/integration/BankingApplicationIntegrationTest.java
+
+diff --git a/services/core-springboot/pom.xml b/services/core-springboot/pom.xml
+new file mode 100644
+index 0000000..8b595ab
+--- /dev/null
++++ b/services/core-springboot/pom.xml
+@@ -0,0 +1,146 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<project xmlns="http://maven.apache.org/POM/4.0.0"
++         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
++    <modelVersion>4.0.0</modelVersion>
++
++    <parent>
++        <groupId>org.springframework.boot</groupId>
++        <artifactId>spring-boot-starter-parent</artifactId>
++        <version>3.3.2</version>
++        <relativePath/>
++    </parent>
++
++    <groupId>com.banking</groupId>
++    <artifactId>core-springboot</artifactId>
++    <version>0.2.0</version>
++    <name>core-springboot</name>
++    <description>Core Transaccional Bancario - Spring Boot 3.3.2</description>
++
++    <properties>
++        <java.version>17</java.version>
++        <otel.version>1.37.0</otel.version>
++        <jjwt.version>0.12.5</jjwt.version>
++    </properties>
++
++    <dependencies>
++        <!-- Spring Boot Starters -->
++        <dependency>
++            <groupId>org.springframework.boot</groupId>
++            <artifactId>spring-boot-starter-web</artifactId>
++        </dependency>
++        <dependency>
++            <groupId>org.springframework.boot</groupId>
++            <artifactId>spring-boot-starter-data-jdbc</artifactId>
++        </dependency>
++        <dependency>
++            <groupId>org.springframework.boot</groupId>
++            <artifactId>spring-boot-starter-security</artifactId>
++        </dependency>
++        <dependency>
++            <groupId>org.springframework.boot</groupId>
++            <artifactId>spring-boot-starter-amqp</artifactId>
++        </dependency>
++        <dependency>
++            <groupId>org.springframework.boot</groupId>
++            <artifactId>spring-boot-starter-validation</artifactId>
++        </dependency>
++        <dependency>
++            <groupId>org.springframework.boot</groupId>
++            <artifactId>spring-boot-starter-actuator</artifactId>
++        </dependency>
++
++        <!-- Database Driver -->
++        <dependency>
++            <groupId>com.microsoft.sqlserver</groupId>
++            <artifactId>mssql-jdbc</artifactId>
++        </dependency>
++
++        <!-- JWT (JJWT) -->
++        <dependency>
++            <groupId>io.jsonwebtoken</groupId>
++            <artifactId>jjwt-api</artifactId>
++            <version>${jjwt.version}</version>
++        </dependency>
++        <dependency>
++            <groupId>io.jsonwebtoken</groupId>
++            <artifactId>jjwt-impl</artifactId>
++            <version>${jjwt.version}</version>
++            <scope>runtime</scope>
++        </dependency>
++        <dependency>
++            <groupId>io.jsonwebtoken</groupId>
++            <artifactId>jjwt-jackson</artifactId>
++            <version>${jjwt.version}</version>
++            <scope>runtime</scope>
++        </dependency>
++
++        <!-- OpenTelemetry -->
++        <dependency>
++            <groupId>io.opentelemetry.instrumentation</groupId>
++            <artifactId>opentelemetry-spring-boot-starter</artifactId>
++            <version>${otel.version}</version>
++        </dependency>
++
++        <!-- Lombok -->
++        <dependency>
++            <groupId>org.projectlombok</groupId>
++            <artifactId>lombok</artifactId>
++            <optional>true</optional>
++        </dependency>
++
++        <!-- Test Dependencies -->
++        <dependency>
++            <groupId>org.springframework.boot</groupId>
++            <artifactId>spring-boot-starter-test</artifactId>
++            <scope>test</scope>
++        </dependency>
++        <dependency>
++            <groupId>org.springframework.amqp</groupId>
++            <artifactId>spring-rabbit-test</artifactId>
++            <scope>test</scope>
++        </dependency>
++        <dependency>
++            <groupId>org.springframework.security</groupId>
++            <artifactId>spring-security-test</artifactId>
++            <scope>test</scope>
++        </dependency>
++        <dependency>
++            <groupId>org.testcontainers</groupId>
++            <artifactId>testcontainers</artifactId>
++            <scope>test</scope>
++        </dependency>
++        <dependency>
++            <groupId>org.testcontainers</groupId>
++            <artifactId>junit-jupiter</artifactId>
++            <scope>test</scope>
++        </dependency>
++        <dependency>
++            <groupId>org.testcontainers</groupId>
++            <artifactId>mssqlserver</artifactId>
++            <scope>test</scope>
++        </dependency>
++        <dependency>
++            <groupId>org.testcontainers</groupId>
++            <artifactId>rabbitmq</artifactId>
++            <scope>test</scope>
++        </dependency>
++    </dependencies>
++
++    <build>
++        <plugins>
++            <plugin>
++                <groupId>org.springframework.boot</groupId>
++                <artifactId>spring-boot-maven-plugin</artifactId>
++                <configuration>
++                    <excludes>
++                        <exclude>
++                            <groupId>org.projectlombok</groupId>
++                            <artifactId>lombok</artifactId>
++                        </exclude>
++                    </excludes>
++                </configuration>
++            </plugin>
++        </plugins>
++    </build>
++</project>
+diff --git a/services/core-springboot/src/main/java/com/banking/core/CoreSpringApplication.java b/services/core-springboot/src/main/java/com/banking/core/CoreSpringApplication.java
+new file mode 100644
+index 0000000..e39b65e
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/CoreSpringApplication.java
+@@ -0,0 +1,13 @@
++package com.banking.core;
++
++import org.springframework.boot.SpringApplication;
++import org.springframework.boot.autoconfigure.SpringBootApplication;
++import org.springframework.scheduling.annotation.EnableScheduling;
++
++@SpringBootApplication
++@EnableScheduling
++public class CoreSpringApplication {
++    public static void main(String[] args) {
++        SpringApplication.run(CoreSpringApplication.class, args);
++    }
++}
+diff --git a/services/core-springboot/src/main/java/com/banking/core/config/CorrelationIdFilter.java b/services/core-springboot/src/main/java/com/banking/core/config/CorrelationIdFilter.java
+new file mode 100644
+index 0000000..e4c1943
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/config/CorrelationIdFilter.java
+@@ -0,0 +1,40 @@
++package com.banking.core.config;
++
++import jakarta.servlet.FilterChain;
++import jakarta.servlet.ServletException;
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpServletResponse;
++import org.slf4j.MDC;
++import org.springframework.core.Ordered;
++import org.springframework.core.annotation.Order;
++import org.springframework.stereotype.Component;
++import org.springframework.web.filter.OncePerRequestFilter;
++
++import java.io.IOException;
++import java.util.UUID;
++
++@Component
++@Order(Ordered.HIGHEST_PRECEDENCE)
++public class CorrelationIdFilter extends OncePerRequestFilter {
++
++    public static final String CORRELATION_ID_HEADER = "X-Correlation-ID";
++    public static final String MDC_CORRELATION_ID_KEY = "correlationId";
++
++    @Override
++    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
++            throws ServletException, IOException {
++        String correlationId = request.getHeader(CORRELATION_ID_HEADER);
++        if (correlationId == null || correlationId.trim().isEmpty()) {
++            correlationId = UUID.randomUUID().toString();
++        }
++
++        MDC.put(MDC_CORRELATION_ID_KEY, correlationId);
++        response.setHeader(CORRELATION_ID_HEADER, correlationId);
++
++        try {
++            filterChain.doFilter(request, response);
++        } finally {
++            MDC.remove(MDC_CORRELATION_ID_KEY);
++        }
++    }
++}
+diff --git a/services/core-springboot/src/main/java/com/banking/core/config/RabbitMQConfig.java b/services/core-springboot/src/main/java/com/banking/core/config/RabbitMQConfig.java
+new file mode 100644
+index 0000000..4aa1145
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/config/RabbitMQConfig.java
+@@ -0,0 +1,32 @@
++package com.banking.core.config;
++
++import org.springframework.amqp.core.TopicExchange;
++import org.springframework.amqp.rabbit.connection.ConnectionFactory;
++import org.springframework.amqp.rabbit.core.RabbitTemplate;
++import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
++import org.springframework.amqp.support.converter.MessageConverter;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++
++@Configuration
++public class RabbitMQConfig {
++
++    public static final String BANKING_EXCHANGE = "banking.exchange";
++
++    @Bean
++    public TopicExchange bankingExchange() {
++        return new TopicExchange(BANKING_EXCHANGE, true, false);
++    }
++
++    @Bean
++    public MessageConverter jsonMessageConverter() {
++        return new Jackson2JsonMessageConverter();
++    }
++
++    @Bean
++    public RabbitTemplate rabbitTemplate(ConnectionFactory connectionFactory, MessageConverter messageConverter) {
++        RabbitTemplate template = new RabbitTemplate(connectionFactory);
++        template.setMessageConverter(messageConverter);
++        return template;
++    }
++}
+diff --git a/services/core-springboot/src/main/java/com/banking/core/controller/BankingController.java b/services/core-springboot/src/main/java/com/banking/core/controller/BankingController.java
+new file mode 100644
+index 0000000..87ab216
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/controller/BankingController.java
+@@ -0,0 +1,42 @@
++package com.banking.core.controller;
++
++import com.banking.core.config.CorrelationIdFilter;
++import com.banking.core.dto.CuentaDto;
++import com.banking.core.dto.MovimientoDto;
++import com.banking.core.dto.TransferenciaRequest;
++import com.banking.core.dto.TransferenciaResponse;
++import com.banking.core.service.BankingService;
++import jakarta.validation.Valid;
++import lombok.RequiredArgsConstructor;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.*;
++
++import java.util.List;
++
++@RestController
++@RequestMapping("/api/v1/banking")
++@RequiredArgsConstructor
++public class BankingController {
++
++    private final BankingService bankingService;
++
++    @PostMapping("/transferencias")
++    public ResponseEntity<TransferenciaResponse> ejecutarTransferencia(
++            @Valid @RequestBody TransferenciaRequest request,
++            @RequestHeader(value = CorrelationIdFilter.CORRELATION_ID_HEADER, required = false) String correlationId) {
++        TransferenciaResponse response = bankingService.ejecutarTransferencia(request, correlationId);
++        return ResponseEntity.ok(response);
++    }
++
++    @GetMapping("/clientes/{clienteId}/cuentas")
++    public ResponseEntity<List<CuentaDto>> listarCuentas(@PathVariable Long clienteId) {
++        List<CuentaDto> cuentas = bankingService.obtenerCuentasPorCliente(clienteId);
++        return ResponseEntity.ok(cuentas);
++    }
++
++    @GetMapping("/cuentas/{numeroCuenta}/movimientos")
++    public ResponseEntity<List<MovimientoDto>> listarMovimientos(@PathVariable String numeroCuenta) {
++        List<MovimientoDto> movimientos = bankingService.obtenerMovimientosCuenta(numeroCuenta);
++        return ResponseEntity.ok(movimientos);
++    }
++}
+diff --git a/services/core-springboot/src/main/java/com/banking/core/dto/CuentaDto.java b/services/core-springboot/src/main/java/com/banking/core/dto/CuentaDto.java
+new file mode 100644
+index 0000000..3a5bfee
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/dto/CuentaDto.java
+@@ -0,0 +1,20 @@
++package com.banking.core.dto;
++
++import lombok.AllArgsConstructor;
++import lombok.Builder;
++import lombok.Data;
++import lombok.NoArgsConstructor;
++
++import java.math.BigDecimal;
++
++@Data
++@Builder
++@NoArgsConstructor
++@AllArgsConstructor
++public class CuentaDto {
++    private String numeroCuenta;
++    private String tipo;
++    private String moneda;
++    private BigDecimal saldo;
++    private String estado;
++}
+diff --git a/services/core-springboot/src/main/java/com/banking/core/dto/MovimientoDto.java b/services/core-springboot/src/main/java/com/banking/core/dto/MovimientoDto.java
+new file mode 100644
+index 0000000..81410be
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/dto/MovimientoDto.java
+@@ -0,0 +1,24 @@
++package com.banking.core.dto;
++
++import lombok.AllArgsConstructor;
++import lombok.Builder;
++import lombok.Data;
++import lombok.NoArgsConstructor;
++
++import java.math.BigDecimal;
++import java.time.LocalDateTime;
++import java.util.UUID;
++
++@Data
++@Builder
++@NoArgsConstructor
++@AllArgsConstructor
++public class MovimientoDto {
++    private Long movimientoId;
++    private UUID transferenciaId;
++    private String tipo;
++    private BigDecimal monto;
++    private BigDecimal saldoPosterior;
++    private String glosa;
++    private LocalDateTime fechaMovimiento;
++}
+diff --git a/services/core-springboot/src/main/java/com/banking/core/dto/TransferenciaRequest.java b/services/core-springboot/src/main/java/com/banking/core/dto/TransferenciaRequest.java
+new file mode 100644
+index 0000000..7d10631
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/dto/TransferenciaRequest.java
+@@ -0,0 +1,31 @@
++package com.banking.core.dto;
++
++import jakarta.validation.constraints.DecimalMin;
++import jakarta.validation.constraints.NotBlank;
++import jakarta.validation.constraints.NotNull;
++import jakarta.validation.constraints.Size;
++import lombok.Data;
++
++import java.math.BigDecimal;
++
++@Data
++public class TransferenciaRequest {
++    @NotBlank(message = "La clave de idempotencia es obligatoria")
++    @Size(max = 64, message = "La clave de idempotencia no puede superar 64 caracteres")
++    private String idempotencyKey;
++
++    @NotBlank(message = "La cuenta de origen es obligatoria")
++    @Size(max = 20)
++    private String cuentaOrigen;
++
++    @NotBlank(message = "La cuenta de destino es obligatoria")
++    @Size(max = 20)
++    private String cuentaDestino;
++
++    @NotNull(message = "El monto es obligatorio")
++    @DecimalMin(value = "0.01", message = "El monto debe ser mayor que cero")
++    private BigDecimal monto;
++
++    @Size(max = 200, message = "La glosa no puede superar 200 caracteres")
++    private String glosa;
++}
+diff --git a/services/core-springboot/src/main/java/com/banking/core/dto/TransferenciaResponse.java b/services/core-springboot/src/main/java/com/banking/core/dto/TransferenciaResponse.java
+new file mode 100644
+index 0000000..ece6616
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/dto/TransferenciaResponse.java
+@@ -0,0 +1,23 @@
++package com.banking.core.dto;
++
++import lombok.AllArgsConstructor;
++import lombok.Builder;
++import lombok.Data;
++import lombok.NoArgsConstructor;
++
++import java.math.BigDecimal;
++import java.time.LocalDateTime;
++import java.util.UUID;
++
++@Data
++@Builder
++@NoArgsConstructor
++@AllArgsConstructor
++public class TransferenciaResponse {
++    private UUID transferenciaId;
++    private String estado;
++    private BigDecimal saldoOrigen;
++    private BigDecimal saldoDestino;
++    private boolean replay;
++    private LocalDateTime fechaCreacion;
++}
+diff --git a/services/core-springboot/src/main/java/com/banking/core/exception/BankingDomainException.java b/services/core-springboot/src/main/java/com/banking/core/exception/BankingDomainException.java
+new file mode 100644
+index 0000000..dcbacaa
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/exception/BankingDomainException.java
+@@ -0,0 +1,14 @@
++package com.banking.core.exception;
++
++public class BankingDomainException extends RuntimeException {
++    private final int errorCode;
++
++    public BankingDomainException(int errorCode, String message) {
++        super(message);
++        this.errorCode = errorCode;
++    }
++
++    public int getErrorCode() {
++        return errorCode;
++    }
++}
+diff --git a/services/core-springboot/src/main/java/com/banking/core/exception/GlobalExceptionHandler.java b/services/core-springboot/src/main/java/com/banking/core/exception/GlobalExceptionHandler.java
+new file mode 100644
+index 0000000..11f525a
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/exception/GlobalExceptionHandler.java
+@@ -0,0 +1,64 @@
++package com.banking.core.exception;
++
++import jakarta.servlet.http.HttpServletRequest;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.ProblemDetail;
++import org.springframework.validation.FieldError;
++import org.springframework.web.bind.MethodArgumentNotValidException;
++import org.springframework.web.bind.annotation.ExceptionHandler;
++import org.springframework.web.bind.annotation.RestControllerAdvice;
++
++import java.net.URI;
++import java.sql.SQLException;
++import java.util.stream.Collectors;
++
++@RestControllerAdvice
++public class GlobalExceptionHandler {
++
++    @ExceptionHandler(BankingDomainException.class)
++    public ProblemDetail handleBankingDomainException(BankingDomainException ex, HttpServletRequest request) {
++        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.getMessage());
++        problem.setType(URI.create("https://api.banking.com/errors/domain-error"));
++        problem.setTitle("Error de Negocio Bancario");
++        problem.setProperty("errorCode", ex.getErrorCode());
++        problem.setProperty("path", request.getRequestURI());
++        return problem;
++    }
++
++    @ExceptionHandler(MethodArgumentNotValidException.class)
++    public ProblemDetail handleValidationException(MethodArgumentNotValidException ex, HttpServletRequest request) {
++        String errors = ex.getBindingResult().getAllErrors().stream()
++                .map(error -> {
++                    String fieldName = ((FieldError) error).getField();
++                    String message = error.getDefaultMessage();
++                    return fieldName + ": " + message;
++                })
++                .collect(Collectors.joining(", "));
++
++        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, errors);
++        problem.setType(URI.create("https://api.banking.com/errors/validation-error"));
++        problem.setTitle("Error de Validación de Datos");
++        problem.setProperty("path", request.getRequestURI());
++        return problem;
++    }
++
++    @ExceptionHandler(SQLException.class)
++    public ProblemDetail handleSqlException(SQLException ex, HttpServletRequest request) {
++        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, "Error interno en base de datos transaccional");
++        problem.setType(URI.create("https://api.banking.com/errors/database-error"));
++        problem.setTitle("Error de Base de Datos");
++        problem.setProperty("sqlState", ex.getSQLState());
++        problem.setProperty("errorCode", ex.getErrorCode());
++        problem.setProperty("path", request.getRequestURI());
++        return problem;
++    }
++
++    @ExceptionHandler(Exception.class)
++    public ProblemDetail handleGenericException(Exception ex, HttpServletRequest request) {
++        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, ex.getMessage());
++        problem.setType(URI.create("https://api.banking.com/errors/internal-error"));
++        problem.setTitle("Error Interno del Servidor");
++        problem.setProperty("path", request.getRequestURI());
++        return problem;
++    }
++}
+diff --git a/services/core-springboot/src/main/java/com/banking/core/model/OutboxEvento.java b/services/core-springboot/src/main/java/com/banking/core/model/OutboxEvento.java
+new file mode 100644
+index 0000000..aab42d5
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/model/OutboxEvento.java
+@@ -0,0 +1,50 @@
++package com.banking.core.model;
++
++import lombok.Data;
++import org.springframework.data.annotation.Id;
++import org.springframework.data.relational.core.mapping.Column;
++import org.springframework.data.relational.core.mapping.Table;
++
++import java.time.LocalDateTime;
++import java.util.UUID;
++
++@Data
++@Table("OutboxEventos")
++public class OutboxEvento {
++    @Id
++    @Column("SecuenciaId")
++    private Long secuenciaId;
++
++    @Column("EventoId")
++    private UUID eventoId;
++
++    @Column("AggregateType")
++    private String aggregateType;
++
++    @Column("AggregateId")
++    private String aggregateId;
++
++    @Column("EventType")
++    private String eventType;
++
++    @Column("Payload")
++    private String payload;
++
++    @Column("CorrelationId")
++    private String correlationId;
++
++    @Column("Estado")
++    private String estado;
++
++    @Column("Intentos")
++    private Integer intentos;
++
++    @Column("UltimoError")
++    private String ultimoError;
++
++    @Column("FechaCreacion")
++    private LocalDateTime fechaCreacion;
++
++    @Column("FechaPublicado")
++    private LocalDateTime fechaPublicado;
++}
+diff --git a/services/core-springboot/src/main/java/com/banking/core/repository/OutboxRepository.java b/services/core-springboot/src/main/java/com/banking/core/repository/OutboxRepository.java
+new file mode 100644
+index 0000000..0977523
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/repository/OutboxRepository.java
+@@ -0,0 +1,19 @@
++package com.banking.core.repository;
++
++import com.banking.core.model.OutboxEvento;
++import org.springframework.data.jdbc.repository.query.Query;
++import org.springframework.data.repository.CrudRepository;
++import org.springframework.data.repository.query.Param;
++import org.springframework.stereotype.Repository;
++
++import java.util.List;
++
++@Repository
++public interface OutboxRepository extends CrudRepository<OutboxEvento, Long> {
++
++    @Query("SELECT TOP (:batchSize) SecuenciaId, EventoId, AggregateType, AggregateId, EventType, Payload, CorrelationId, Estado, Intentos, UltimoError, FechaCreacion, FechaPublicado " +
++           "FROM dbo.OutboxEventos WITH (UPDLOCK, READPAST) " +
++           "WHERE Estado = 'PENDIENTE' " +
++           "ORDER BY SecuenciaId ASC")
++    List<OutboxEvento> findPendingEventsForProcessing(@Param("batchSize") int batchSize);
++}
+diff --git a/services/core-springboot/src/main/java/com/banking/core/security/SecurityConfig.java b/services/core-springboot/src/main/java/com/banking/core/security/SecurityConfig.java
+new file mode 100644
+index 0000000..f3f7c2c
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/security/SecurityConfig.java
+@@ -0,0 +1,79 @@
++package com.banking.core.security;
++
++import io.jsonwebtoken.Claims;
++import io.jsonwebtoken.Jwts;
++import io.jsonwebtoken.security.Keys;
++import jakarta.servlet.FilterChain;
++import jakarta.servlet.ServletException;
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpServletResponse;
++import org.springframework.beans.factory.annotation.Value;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
++import org.springframework.security.config.annotation.web.builders.HttpSecurity;
++import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
++import org.springframework.security.config.http.SessionCreationPolicy;
++import org.springframework.security.core.authority.SimpleGrantedAuthority;
++import org.springframework.security.core.context.SecurityContextHolder;
++import org.springframework.security.web.SecurityFilterChain;
++import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
++import org.springframework.web.filter.OncePerRequestFilter;
++
++import javax.crypto.SecretKey;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.util.Collections;
++import java.util.List;
++
++@Configuration
++@EnableWebSecurity
++public class SecurityConfig {
++
++    @Value("${banking.jwt.secret}")
++    private String jwtSecret;
++
++    @Bean
++    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
++        http
++            .csrf(csrf -> csrf.disable())
++            .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
++            .authorizeHttpRequests(auth -> auth
++                .requestMatchers("/actuator/**").permitAll()
++                .anyRequest().authenticated()
++            )
++            .addFilterBefore(new JwtTokenFilter(jwtSecret), UsernamePasswordAuthenticationFilter.class);
++
++        return http.build();
++    }
++
++    public static class JwtTokenFilter extends OncePerRequestFilter {
++        private final String secret;
++
++        public JwtTokenFilter(String secret) {
++            this.secret = secret;
++        }
++
++        @Override
++        protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
++                throws ServletException, IOException {
++            String header = request.getHeader("Authorization");
++            if (header != null && header.startsWith("Bearer ")) {
++                String token = header.substring(7);
++                try {
++                    SecretKey key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
++                    Claims claims = Jwts.parser().verifyWith(key).build().parseSignedClaims(token).getPayload();
++                    String username = claims.getSubject();
++                    if (username != null) {
++                        List<SimpleGrantedAuthority> authorities = Collections.singletonList(new SimpleGrantedAuthority("ROLE_USER"));
++                        UsernamePasswordAuthenticationToken auth = new UsernamePasswordAuthenticationToken(username, null, authorities);
++                        SecurityContextHolder.getContext().setAuthentication(auth);
++                    }
++                } catch (Exception e) {
++                    SecurityContextHolder.clearContext();
++                }
++            }
++            filterChain.doFilter(request, response);
++        }
++    }
++}
+diff --git a/services/core-springboot/src/main/java/com/banking/core/service/BankingService.java b/services/core-springboot/src/main/java/com/banking/core/service/BankingService.java
+new file mode 100644
+index 0000000..1aec6c0
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/service/BankingService.java
+@@ -0,0 +1,112 @@
++package com.banking.core.service;
++
++import com.banking.core.dto.CuentaDto;
++import com.banking.core.dto.MovimientoDto;
++import com.banking.core.dto.TransferenciaRequest;
++import com.banking.core.dto.TransferenciaResponse;
++import com.banking.core.exception.BankingDomainException;
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.stereotype.Service;
++import org.springframework.transaction.annotation.Transactional;
++
++import java.math.BigDecimal;
++import java.sql.CallableStatement;
++import java.sql.ResultSet;
++import java.sql.SQLException;
++import java.sql.Timestamp;
++import java.time.LocalDateTime;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.UUID;
++
++@Slf4j
++@Service
++@RequiredArgsConstructor
++public class BankingService {
++
++    private final JdbcTemplate jdbcTemplate;
++
++    @Transactional
++    public TransferenciaResponse ejecutarTransferencia(TransferenciaRequest request, String correlationId) {
++        return jdbcTemplate.execute((java.sql.Connection conn) -> {
++            try (CallableStatement stmt = conn.prepareCall("{CALL dbo.sp_EjecutarTransferencia (?, ?, ?, ?, ?, ?)}")) {
++                stmt.setString(1, request.getIdempotencyKey());
++                stmt.setString(2, request.getCuentaOrigen());
++                stmt.setString(3, request.getCuentaDestino());
++                stmt.setBigDecimal(4, request.getMonto());
++                stmt.setString(5, request.getGlosa());
++                stmt.setString(6, correlationId);
++
++                boolean hasResult = stmt.execute();
++                if (!hasResult) {
++                    throw new RuntimeException("El procedimiento almacenado no retornó resultados.");
++                }
++
++                try (ResultSet rs = stmt.getResultSet()) {
++                    if (rs.next()) {
++                        UUID transferenciaId = (UUID) rs.getObject("TransferenciaId");
++                        String estado = rs.getString("Estado");
++                        BigDecimal saldoOrigen = rs.getBigDecimal("SaldoOrigen");
++                        BigDecimal saldoDestino = rs.getBigDecimal("SaldoDestino");
++                        boolean replay = false;
++                        try {
++                            replay = rs.getBoolean("Replay");
++                        } catch (SQLException ignored) {}
++
++                        LocalDateTime fecha = LocalDateTime.now();
++                        try {
++                            Timestamp ts = rs.getTimestamp("FechaCreacion");
++                            if (ts != null) {
++                                fecha = ts.toLocalDateTime();
++                            }
++                        } catch (SQLException ignored) {}
++
++                        log.info("Transferencia ejecutada con éxito. ID: {}, Estado: {}, CorrelationId: {}", transferenciaId, estado, correlationId);
++                        return TransferenciaResponse.builder()
++                                .transferenciaId(transferenciaId)
++                                .estado(estado)
++                                .saldoOrigen(saldoOrigen)
++                                .saldoDestino(saldoDestino)
++                                .replay(replay)
++                                .fechaCreacion(fecha)
++                                .build();
++                    } else {
++                        throw new RuntimeException("No se encontró resultado en el ResultSet del procedimiento.");
++                    }
++                }
++            }
++        });
++    }
++
++    @Transactional(readOnly = true)
++    public List<CuentaDto> obtenerCuentasPorCliente(Long clienteId) {
++        String sql = "SELECT NumeroCuenta, Tipo, Moneda, Saldo, Estado FROM dbo.Cuentas WHERE ClienteId = ?";
++        return jdbcTemplate.query(sql, (rs, rowNum) -> CuentaDto.builder()
++                .numeroCuenta(rs.getString("NumeroCuenta"))
++                .tipo(rs.getString("Tipo"))
++                .moneda(rs.getString("Moneda"))
++                .saldo(rs.getBigDecimal("Saldo"))
++                .estado(rs.getString("Estado"))
++                .build(), clienteId);
++    }
++
++    @Transactional(readOnly = true)
++    public List<MovimientoDto> obtenerMovimientosCuenta(String numeroCuenta) {
++        String sql = "SELECT m.MovimientoId, m.TransferenciaId, m.Tipo, m.Monto, m.SaldoPosterior, m.Glosa, m.FechaMovimiento " +
++                     "FROM dbo.Movimientos m " +
++                     "JOIN dbo.Cuentas c ON m.CuentaId = c.CuentaId " +
++                     "WHERE c.NumeroCuenta = ? " +
++                     "ORDER BY m.FechaMovimiento DESC";
++        return jdbcTemplate.query(sql, (rs, rowNum) -> MovimientoDto.builder()
++                .movimientoId(rs.getLong("MovimientoId"))
++                .transferenciaId((UUID) rs.getObject("TransferenciaId"))
++                .tipo(rs.getString("Tipo"))
++                .monto(rs.getBigDecimal("Monto"))
++                .saldoPosterior(rs.getBigDecimal("SaldoPosterior"))
++                .glosa(rs.getString("Glosa"))
++                .fechaMovimiento(rs.getTimestamp("FechaMovimiento").toLocalDateTime())
++                .build(), numeroCuenta);
++    }
++}
+diff --git a/services/core-springboot/src/main/java/com/banking/core/service/OutboxPoller.java b/services/core-springboot/src/main/java/com/banking/core/service/OutboxPoller.java
+new file mode 100644
+index 0000000..e59b97f
+--- /dev/null
++++ b/services/core-springboot/src/main/java/com/banking/core/service/OutboxPoller.java
+@@ -0,0 +1,65 @@
++package com.banking.core.service;
++
++import com.banking.core.config.RabbitMQConfig;
++import com.banking.core.model.OutboxEvento;
++import com.banking.core.repository.OutboxRepository;
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import org.springframework.amqp.rabbit.core.RabbitTemplate;
++import org.springframework.scheduling.annotation.Scheduled;
++import org.springframework.stereotype.Component;
++import org.springframework.transaction.annotation.Transactional;
++
++import java.time.LocalDateTime;
++import java.util.List;
++
++@Slf4j
++@Component
++@RequiredArgsConstructor
++public class OutboxPoller {
++
++    private final OutboxRepository outboxRepository;
++    private final RabbitTemplate rabbitTemplate;
++
++    @Scheduled(fixedRateString = "${banking.outbox.fixed-rate-ms:3000}")
++    @Transactional
++    public void pollAndPublishOutboxEvents() {
++        List<OutboxEvento> pendientes = outboxRepository.findPendingEventsForProcessing(50);
++        if (pendientes.isEmpty()) {
++            return;
++        }
++
++        log.debug("OutboxPoller: procesando {} eventos pendientes", pendientes.size());
++
++        for (OutboxEvento evento : pendientes) {
++            try {
++                rabbitTemplate.convertAndSend(
++                        RabbitMQConfig.BANKING_EXCHANGE,
++                        "banking.transferencia.realizada",
++                        evento.getPayload(),
++                        message -> {
++                            if (evento.getCorrelationId() != null) {
++                                message.getMessageProperties().setHeader("X-Correlation-ID", evento.getCorrelationId());
++                            }
++                            return message;
++                        }
++                );
++
++                evento.setEstado("PUBLICADO");
++                evento.setFechaPublicado(LocalDateTime.now());
++                evento.setUltimoError(null);
++                outboxRepository.save(evento);
++
++                log.info("Evento Outbox {} publicado exitosamente en RabbitMQ", evento.getEventoId());
++            } catch (Exception e) {
++                log.error("Error publicando evento Outbox {}: {}", evento.getEventoId(), e.getMessage());
++                evento.setIntentos(evento.getIntentos() + 1);
++                evento.setUltimoError(e.getMessage());
++                if (evento.getIntentos() >= 5) {
++                    evento.setEstado("FALLIDO");
++                }
++                outboxRepository.save(evento);
++            }
++        }
++    }
++}
+diff --git a/services/core-springboot/src/main/resources/application.yml b/services/core-springboot/src/main/resources/application.yml
+new file mode 100644
+index 0000000..15afed8
+--- /dev/null
++++ b/services/core-springboot/src/main/resources/application.yml
+@@ -0,0 +1,42 @@
++server:
++  port: ${SERVER_PORT:8080}
++  error:
++    include-message: always
++    include-binding-errors: always
++
++spring:
++  application:
++    name: core-springboot
++  datasource:
++    url: ${SPRING_DATASOURCE_URL:jdbc:sqlserver://localhost:1433;databaseName=BankingCore;encrypt=true;trustServerCertificate=true}
++    username: ${SPRING_DATASOURCE_USERNAME:banking_app}
++    password: ${SPRING_DATASOURCE_PASSWORD:App#Banking2026}
++    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
++  rabbitmq:
++    host: ${SPRING_RABBITMQ_HOST:localhost}
++    port: ${SPRING_RABBITMQ_PORT:5672}
++    username: ${SPRING_RABBITMQ_USERNAME:banking}
++    password: ${SPRING_RABBITMQ_PASSWORD:Rabbit#Bus2026}
++
++banking:
++  jwt:
++    secret: ${APP_JWT_SECRET:cambia-este-secreto-por-uno-de-al-menos-32-caracteres-aleatorios}
++  outbox:
++    fixed-rate-ms: 3000
++    batch-size: 50
++
++management:
++  endpoints:
++    web:
++      exposure:
++        include: health,info,prometheus,metrics
++  endpoint:
++    health:
++      show-details: always
++  metrics:
++    tags:
++      application: ${spring.application.name}
++
++logging:
++  pattern:
++    level: "%5p [${spring.application.name},%X{traceId:-},%X{spanId:-},%X{correlationId:-}]"
+diff --git a/services/core-springboot/src/test/java/com/banking/core/integration/BankingApplicationIntegrationTest.java b/services/core-springboot/src/test/java/com/banking/core/integration/BankingApplicationIntegrationTest.java
+new file mode 100644
+index 0000000..8844090
+--- /dev/null
++++ b/services/core-springboot/src/test/java/com/banking/core/integration/BankingApplicationIntegrationTest.java
+@@ -0,0 +1,80 @@
++package com.banking.core.integration;
++
++import com.banking.core.dto.TransferenciaRequest;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.jsonwebtoken.Jwts;
++import io.jsonwebtoken.security.Keys;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.http.MediaType;
++import org.springframework.test.context.DynamicPropertyRegistry;
++import org.springframework.test.context.DynamicPropertySource;
++import org.springframework.test.web.servlet.MockMvc;
++import org.testcontainers.containers.MSSQLServerContainer;
++import org.testcontainers.containers.RabbitMQContainer;
++import org.testcontainers.junit.jupiter.Container;
++import org.testcontainers.junit.jupiter.Testcontainers;
++
++import javax.crypto.SecretKey;
++import java.math.BigDecimal;
++import java.nio.charset.StandardCharsets;
++import java.util.Date;
++import java.util.UUID;
++
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
++
++@SpringBootTest
++@AutoConfigureMockMvc
++@Testcontainers
++class BankingApplicationIntegrationTest {
++
++    @Container
++    static MSSQLServerContainer<?> mssql = new MSSQLServerContainer<>("mcr.microsoft.com/mssql/server:2022-latest")
++            .acceptLicense()
++            .withPassword("Banking#Strong2026");
++
++    @Container
++    static RabbitMQContainer rabbitmq = new RabbitMQContainer("rabbitmq:3.13-management-alpine")
++            .withUser("banking", "Rabbit#Bus2026");
++
++    @Autowired
++    private MockMvc mockMvc;
++
++    @Autowired
++    private ObjectMapper objectMapper;
++
++    private static final String JWT_SECRET = "cambia-este-secreto-por-uno-de-al-menos-32-caracteres-aleatorios-test";
++
++    @DynamicPropertySource
++    static void configureProperties(DynamicPropertyRegistry registry) {
++        registry.add("spring.datasource.url", mssql::getJdbcUrl);
++        registry.add("spring.datasource.username", () -> "sa");
++        registry.add("spring.datasource.password", mssql::getPassword);
++        registry.add("spring.rabbitmq.host", rabbitmq::getHost);
++        registry.add("spring.rabbitmq.port", rabbitmq::getAmqpPort);
++        registry.add("banking.jwt.secret", () -> JWT_SECRET);
++    }
++
++    private String generateTestJwt() {
++        SecretKey key = Keys.hmacShaKeyFor(JWT_SECRET.getBytes(StandardCharsets.UTF_8));
++        return Jwts.builder()
++                .subject("test-user")
++                .issuedAt(new Date())
++                .expiration(new Date(System.currentTimeMillis() + 3600000))
++                .signWith(key)
++                .compact();
++    }
++
++    @Test
++    void testHealthEndpoint() throws Exception {
++        mockMvc.perform(get("/actuator/health"))
++                .andExpect(status().isOk())
++                .andExpect(jsonPath("$.status").exists());
++    }
++}
+-- 
+2.55.0.windows.2
+
