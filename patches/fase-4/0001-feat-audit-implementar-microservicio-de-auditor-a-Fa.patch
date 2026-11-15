@@ -1,0 +1,353 @@
+From d787bb569ecbbe6a69b0ce051fd6559e3f063fcc Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sat, 14 Nov 2026 22:40:58 -0300
+Subject: [PATCH] =?UTF-8?q?feat(audit):=20implementar=20microservicio=20de?=
+ =?UTF-8?q?=20auditor=C3=ADa=20FastAPI,=20NGINX=20Gateway,=20k6=20tests=20?=
+ =?UTF-8?q?y=20ADRs?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ docs/adr/001-strangler-fig-pattern.md   |  14 +++
+ docs/adr/002-transactional-outbox.md    |  14 +++
+ docs/adr/003-api-gateway-pattern.md     |  14 +++
+ gateway-nginx/nginx.conf                |  68 +++++++-------
+ load-tests/transfer-stress.js           |  41 +++++++++
+ services/audit-fastapi/main.py          | 112 ++++++++++++++++++++++++
+ services/audit-fastapi/requirements.txt |   6 ++
+ 7 files changed, 232 insertions(+), 37 deletions(-)
+ create mode 100644 docs/adr/001-strangler-fig-pattern.md
+ create mode 100644 docs/adr/002-transactional-outbox.md
+ create mode 100644 docs/adr/003-api-gateway-pattern.md
+ create mode 100644 load-tests/transfer-stress.js
+ create mode 100644 services/audit-fastapi/main.py
+ create mode 100644 services/audit-fastapi/requirements.txt
+
+diff --git a/docs/adr/001-strangler-fig-pattern.md b/docs/adr/001-strangler-fig-pattern.md
+new file mode 100644
+index 0000000..3b17c62
+--- /dev/null
++++ b/docs/adr/001-strangler-fig-pattern.md
+@@ -0,0 +1,14 @@
++# ADR 001: Implementación del Patrón Strangler Fig para Modernización Bancaria
++
++## Estado
++Aprobado
++
++## Contexto
++El sistema bancario heredado monolítico presenta limitaciones en escalabilidad, despliegues y mantenimiento. Se requiere una migración gradual hacia microservicios modernos (Spring Boot, NestJS, FastAPI) sin interrumpir la operación transaccional continua.
++
++## Decisión
++Adoptar el patrón **Strangler Fig** utilizando NGINX como API Gateway para enrutar tráfico de manera gradual e incremental desde el exterior hacia los nuevos servicios de aplicación, aislando progresivamente el monolito hasta su reemplazo total.
++
++## Consecuencias
++- Migración de riesgo controlado sin downtime.
++- Capacidad de operar arquitecturas híbridas temporalmente.
+diff --git a/docs/adr/002-transactional-outbox.md b/docs/adr/002-transactional-outbox.md
+new file mode 100644
+index 0000000..8996018
+--- /dev/null
++++ b/docs/adr/002-transactional-outbox.md
+@@ -0,0 +1,14 @@
++# ADR 002: Transaccional Outbox y Consistencia Eventual con RabbitMQ
++
++## Estado
++Aprobado
++
++## Contexto
++Las transferencias bancarias requieren atomicidad estricta en base de datos (MS SQL Server) y, simultáneamente, la publicación confiable de eventos hacia el bus de mensajes (RabbitMQ) para la auditoría y notificaciones. El patrón de doble escritura (Dual Write) directo provoca inconsistencias si el broker falla tras el commit local.
++
++## Decisión
++Implementar el patrón **Transactional Outbox**. Los eventos de negocio se escriben en la tabla `OutboxEventos` dentro de la misma transacción ACID de MS SQL Server. Un proceso dedicado (`OutboxPoller`) con bloqueos `UPDLOCK, READPAST` lee y publica de forma idempotente los eventos hacia RabbitMQ.
++
++## Consecuencias
++- Garantía absoluta de entrega de eventos (At-least-once delivery).
++- Resiliencia ante caídas del Message Broker.
+diff --git a/docs/adr/003-api-gateway-pattern.md b/docs/adr/003-api-gateway-pattern.md
+new file mode 100644
+index 0000000..58f23af
+--- /dev/null
++++ b/docs/adr/003-api-gateway-pattern.md
+@@ -0,0 +1,14 @@
++# ADR 003: API Gateway con NGINX para Seguridad y Rate Limiting
++
++## Estado
++Aprobado
++
++## Contexto
++Los microservicios expuestos necesitan una capa unificada de entrada que proteja contra ataques de denegación de servicio (DoS), aplique límites de tasa (rate limiting), inyecte cabeceras de seguridad HTTP y centralice el enrutamiento.
++
++## Decisión
++Utilizar **NGINX** como API Gateway perimetral con directivas nativas de `limit_req`, cabeceras de seguridad estrictas (X-Frame-Options, X-Content-Type-Options) y proxy reverso hacia el BFF de NestJS y el servicio de auditoría FastAPI.
++
++## Consecuencias
++- Reducción de la superficie de ataque expuesta directamente a los microservicios.
++- Control centralizado del tráfico transaccional entrante.
+diff --git a/gateway-nginx/nginx.conf b/gateway-nginx/nginx.conf
+index 95eb67b..7dcf956 100644
+--- a/gateway-nginx/nginx.conf
++++ b/gateway-nginx/nginx.conf
+@@ -1,51 +1,45 @@
+-# Gateway minimo de Fase 1: arranca aunque los upstreams aun no existan
+-# (resolucion DNS diferida con variable + resolver de Docker).
+-# La Fase 4 lo reemplaza con rate limiting, cabeceras de seguridad y rutas completas.
+ worker_processes auto;
+ pid /tmp/nginx.pid;
+ 
+-events { worker_connections 1024; }
++events {
++    worker_connections 1024;
++}
+ 
+ http {
+-    include       /etc/nginx/mime.types;
+-    default_type  application/octet-stream;
+-    access_log    /dev/stdout;
+-    error_log     /dev/stderr warn;
+-
+-    client_body_temp_path /tmp/client_temp;
+-    proxy_temp_path       /tmp/proxy_temp;
+-    fastcgi_temp_path     /tmp/fastcgi_temp;
+-    uwsgi_temp_path       /tmp/uwsgi_temp;
+-    scgi_temp_path        /tmp/scgi_temp;
+-
+-    resolver 127.0.0.11 valid=10s ipv6=off;
+-
+-    # Propaga X-Correlation-ID o lo genera si el cliente no lo envia
+-    map $http_x_correlation_id $correlation_id {
+-        default $http_x_correlation_id;
+-        ""      $request_id;
+-    }
++    include /etc/nginx/mime.types;
++    default_type application/octet-stream;
++
++    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=15r/s;
+ 
+     server {
+         listen 80;
+-        server_tokens off;
+-
+-        add_header X-Correlation-ID $correlation_id always;
++        server_name localhost;
++
++        add_header X-Frame-Options "DENY" always;
++        add_header X-Content-Type-Options "nosniff" always;
++        add_header X-XSS-Protection "1; mode=block" always;
++
++        location /api/v1/bff/ {
++            limit_req zone=api_limit burst=30 nodelay;
++            proxy_pass http://bff-nestjs:3000;
++            proxy_set_header Host $host;
++            proxy_set_header X-Real-IP $remote_addr;
++            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
++            proxy_set_header X-Correlation-ID $http_x_correlation_id;
++        }
+ 
+-        location = /healthz {
+-            default_type text/plain;
+-            return 200 "ok\n";
++        location /api/v1/audit/ {
++            limit_req zone=api_limit burst=30 nodelay;
++            proxy_pass http://audit-fastapi:8000;
++            proxy_set_header Host $host;
++            proxy_set_header X-Real-IP $remote_addr;
++            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
++            proxy_set_header X-Correlation-ID $http_x_correlation_id;
+         }
+ 
+-        location /api/ {
+-            set $bff http://bff-nestjs:3000;
+-            proxy_pass $bff;
+-            proxy_http_version 1.1;
+-            proxy_set_header Host              $host;
+-            proxy_set_header X-Real-IP         $remote_addr;
+-            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+-            proxy_set_header X-Forwarded-Proto $scheme;
+-            proxy_set_header X-Correlation-ID   $correlation_id;
++        location /health {
++            return 200 'OK';
++            add_header Content-Type text/plain;
+         }
+     }
+ }
+diff --git a/load-tests/transfer-stress.js b/load-tests/transfer-stress.js
+new file mode 100644
+index 0000000..6d15c32
+--- /dev/null
++++ b/load-tests/transfer-stress.js
+@@ -0,0 +1,41 @@
++import http from 'k6/http';
++import { check, sleep } from 'k6';
++
++export const options = {
++  stages: [
++    { duration: '20s', target: 10 },
++    { duration: '40s', target: 30 },
++    { duration: '20s', target: 0 },
++  ],
++  thresholds: {
++    http_req_duration: ['p(95)<600'],
++    http_req_failed: ['rate<0.02'],
++  },
++};
++
++const BASE_URL = 'http://localhost:8088/api/v1/bff';
++
++export default function () {
++  const url = `${BASE_URL}/transferencias`;
++  const payload = JSON.stringify({
++    idempotencyKey: `idem-${Date.now()}-${Math.floor(Math.random() * 1000000)}`,
++    cuentaOrigen: '11222333',
++    cuentaDestino: '99888777',
++    monto: 500.00,
++    glosa: 'k6 stress transfer'
++  });
++
++  const params = {
++    headers: {
++      'Content-Type': 'application/json',
++      'X-Correlation-ID': `k6-corr-${Date.now()}`,
++      'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LXVzZXIifQ.dummy'
++    },
++  };
++
++  const res = http.post(url, payload, params);
++  check(res, {
++    'status es 200 o 400 (negocio)': (r) => r.status === 200 || r.status === 400,
++  });
++  sleep(1);
++}
+diff --git a/services/audit-fastapi/main.py b/services/audit-fastapi/main.py
+new file mode 100644
+index 0000000..0a69d9f
+--- /dev/null
++++ b/services/audit-fastapi/main.py
+@@ -0,0 +1,112 @@
++import os
++import json
++import threading
++import time
++from fastapi import FastAPI, Depends, HTTPException
++from sqlalchemy import create_engine, Column, String, DateTime, Text, BigInteger
++from sqlalchemy.ext.declarative import declarative_base
++from sqlalchemy.orm import sessionmaker, Session
++import pika
++from datetime import datetime
++
++DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://audit_user:Audit#Pg2026@postgres:5432/audit_db")
++RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://banking:Rabbit#Bus2026@rabbitmq:5672/")
++
++engine = create_engine(DATABASE_URL)
++SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
++Base = declarative_base()
++
++class ComprobanteAuditoria(Base):
++    __tablename__ = "comprobantes_auditoria"
++    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
++    transferencia_id = Column(String(36), unique=True, index=True, nullable=False)
++    cuenta_origen = Column(String(20), nullable=False)
++    cuenta_destino = Column(String(20), nullable=False)
++    monto = Column(String(50), nullable=False)
++    moneda = Column(String(3), nullable=False)
++    glosa = Column(String(200), nullable=True)
++    saldo_origen = Column(String(50), nullable=False)
++    saldo_destino = Column(String(50), nullable=False)
++    correlation_id = Column(String(64), nullable=True)
++    fecha_evento = Column(DateTime, default=datetime.utcnow)
++
++Base.metadata.create_all(bind=engine)
++
++app = FastAPI(title="Audit FastAPI Service", version="1.0.0")
++
++def get_db():
++    db = SessionLocal()
++    try:
++        yield db
++    finally:
++        db.close()
++
++def rabbitmq_consumer():
++    while True:
++        try:
++            params = pika.URLParameters(RABBITMQ_URL)
++            connection = pika.BlockingConnection(params)
++            channel = connection.channel()
++            channel.exchange_declare(exchange='banking.exchange', exchange_type='topic', durable=True)
++            result = channel.queue_declare(queue='audit_queue', durable=True)
++            queue_name = result.method.queue
++            channel.queue_bind(exchange='banking.exchange', queue=queue_name, routing_key='banking.transferencia.realizada')
++
++            def callback(ch, method, properties, body):
++                try:
++                    data = json.loads(body.decode('utf-8'))
++                    db = SessionLocal()
++                    trans_id = data.get("transferenciaId")
++                    existing = db.query(ComprobanteAuditoria).filter_by(transferencia_id=trans_id).first()
++                    if not existing:
++                        audit = ComprobanteAuditoria(
++                            transferencia_id=trans_id,
++                            cuenta_origen=data.get("cuentaOrigen"),
++                            cuenta_destino=data.get("cuentaDestino"),
++                            monto=str(data.get("monto")),
++                            moneda=data.get("moneda"),
++                            glosa=data.get("glosa"),
++                            saldo_origen=str(data.get("saldoOrigen")),
++                            saldo_destino=str(data.get("saldoDestino")),
++                            correlation_id=properties.headers.get("X-Correlation-ID") if properties.headers else None
++                        )
++                        db.add(audit)
++                        db.commit()
++                    db.close()
++                    ch.basic_ack(delivery_tag=method.delivery_tag)
++                except Exception as e:
++                    print(f"Error procesando mensaje de auditoría: {e}")
++                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
++
++            channel.basic_consume(queue=queue_name, on_message_callback=callback)
++            channel.start_consuming()
++        except Exception as e:
++            print(f"Conexión RabbitMQ caída en Audit, reintentando en 5s: {e}")
++            time.sleep(5)
++
++@app.on_event("startup")
++def startup_event():
++    t = threading.Thread(target=rabbitmq_consumer, daemon=True)
++    t.start()
++
++@app.get("/api/v1/audit/comprobantes/{transferencia_id}")
++def obtener_comprobante(transferencia_id: str, db: Session = Depends(get_db)):
++    comp = db.query(ComprobanteAuditoria).filter_by(transferencia_id=transferencia_id).first()
++    if not comp:
++        raise HTTPException(status_code=404, detail="Comprobante no encontrado en auditoría")
++    return {
++        "transferenciaId": comp.transferencia_id,
++        "cuentaOrigen": comp.cuenta_origen,
++        "cuentaDestino": comp.cuenta_destino,
++        "monto": comp.monto,
++        "moneda": comp.moneda,
++        "glosa": comp.glosa,
++        "saldoOrigen": comp.saldo_origen,
++        "saldoDestino": comp.saldo_destino,
++        "correlationId": comp.correlation_id,
++        "fechaEvento": comp.fecha_evento.isoformat()
++    }
++
++@app.get("/health")
++def health_check():
++    return {"status": "UP"}
+diff --git a/services/audit-fastapi/requirements.txt b/services/audit-fastapi/requirements.txt
+new file mode 100644
+index 0000000..b315e41
+--- /dev/null
++++ b/services/audit-fastapi/requirements.txt
+@@ -0,0 +1,6 @@
++fastapi==0.111.0
++uvicorn==0.30.1
++sqlalchemy==2.0.31
++psycopg2-binary==2.9.9
++pika==1.3.2
++pydantic==2.7.4
+-- 
+2.55.0.windows.2
+
