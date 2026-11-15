@@ -97,7 +97,7 @@ services:
     volumes:
       - rabbit-data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping && wget -q --spider http://127.0.0.1:15672/"]
       interval: 15s
       timeout: 10s
       retries: 10
@@ -143,6 +143,7 @@ services:
         condition: service_started
     environment:
       NODE_ENV: "production"
+      APP_PORT: "3000"
       PORT: "3000"
       CORE_BASE_URL: "http://core-springboot:8080"
       REDIS_HOST: "redis"
@@ -152,7 +153,7 @@ services:
       OTEL_SERVICE_NAME: "bff-nestjs"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
     ports:
-      - "3000:3000"
+      - "${BFF_HOST_PORT:-3002}:3000"
     networks: [banking-net]
 
   audit-fastapi:
@@ -166,9 +167,12 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-      PORT: "8000"
+      APP_PORT: "8000"
       DATABASE_URL: "postgresql://${POSTGRES_USER:-audit_user}:${POSTGRES_PASSWORD:-Audit#Pg2026}@postgres:5432/${POSTGRES_DB:-audit_db}"
-      RABBITMQ_URL: "amqp://${RABBITMQ_DEFAULT_USER:-banking}:${RABBITMQ_DEFAULT_PASS:-Rabbit#Bus2026}@rabbitmq:5672/"
+      RABBITMQ_HOST: "rabbitmq"
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: "${RABBITMQ_DEFAULT_USER:-banking}"
+      RABBITMQ_PASSWORD: "${RABBITMQ_DEFAULT_PASS:-Rabbit#Bus2026}"
       OTEL_SERVICE_NAME: "audit-fastapi"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
     expose: ["8000"]
@@ -186,6 +190,17 @@ services:
       - "8088:80"
     volumes:
       - ./gateway-nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      bff-nestjs:
+        condition: service_healthy
+      audit-fastapi:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     networks: [banking-net]
 
   # ----------------------------------------- Observabilidad (heredada: ./monitoring) ----

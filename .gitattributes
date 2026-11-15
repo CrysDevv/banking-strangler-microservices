@@ -1,2 +1,3 @@
 patches/** linguist-generated=true
 *.sh linguist-vendored
+*.sh text eol=lf

@@ -1,0 +1,336 @@
+From f40dbdb0d3d62870428e425de6256d3320b79ee4 Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 13:37:16 -0300
+Subject: [PATCH 3/4] build(infra): actualizar dockerfiles, docker-compose,
+ observabilidad y scripts de arranque
+
+---
+ docker-compose.yml                    |  23 +++++-
+ docker/Dockerfile.node20              |  27 ++++---
+ docker/Dockerfile.python312           |   4 +-
+ monitoring/otel-collector-config.yaml |  31 ++++++++
+ setup.ps1                             |   9 +++
+ start.ps1                             | 101 ++++++++++++++++++++++++++
+ 6 files changed, 179 insertions(+), 16 deletions(-)
+ create mode 100644 monitoring/otel-collector-config.yaml
+ create mode 100644 setup.ps1
+ create mode 100644 start.ps1
+
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 69ccfcb..5b385a1 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -97,7 +97,7 @@ services:
+     volumes:
+       - rabbit-data:/var/lib/rabbitmq
+     healthcheck:
+-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
++      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping && wget -q --spider http://127.0.0.1:15672/"]
+       interval: 15s
+       timeout: 10s
+       retries: 10
+@@ -143,6 +143,7 @@ services:
+         condition: service_started
+     environment:
+       NODE_ENV: "production"
++      APP_PORT: "3000"
+       PORT: "3000"
+       CORE_BASE_URL: "http://core-springboot:8080"
+       REDIS_HOST: "redis"
+@@ -152,7 +153,7 @@ services:
+       OTEL_SERVICE_NAME: "bff-nestjs"
+       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+     ports:
+-      - "3000:3000"
++      - "${BFF_HOST_PORT:-3002}:3000"
+     networks: [banking-net]
+ 
+   audit-fastapi:
+@@ -166,9 +167,12 @@ services:
+       rabbitmq:
+         condition: service_healthy
+     environment:
+-      PORT: "8000"
++      APP_PORT: "8000"
+       DATABASE_URL: "postgresql://${POSTGRES_USER:-audit_user}:${POSTGRES_PASSWORD:-Audit#Pg2026}@postgres:5432/${POSTGRES_DB:-audit_db}"
+-      RABBITMQ_URL: "amqp://${RABBITMQ_DEFAULT_USER:-banking}:${RABBITMQ_DEFAULT_PASS:-Rabbit#Bus2026}@rabbitmq:5672/"
++      RABBITMQ_HOST: "rabbitmq"
++      RABBITMQ_PORT: "5672"
++      RABBITMQ_USER: "${RABBITMQ_DEFAULT_USER:-banking}"
++      RABBITMQ_PASSWORD: "${RABBITMQ_DEFAULT_PASS:-Rabbit#Bus2026}"
+       OTEL_SERVICE_NAME: "audit-fastapi"
+       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+     expose: ["8000"]
+@@ -186,6 +190,17 @@ services:
+       - "8088:80"
+     volumes:
+       - ./gateway-nginx/nginx.conf:/etc/nginx/nginx.conf:ro
++    depends_on:
++      bff-nestjs:
++        condition: service_healthy
++      audit-fastapi:
++        condition: service_healthy
++    healthcheck:
++      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/health"]
++      interval: 10s
++      timeout: 3s
++      retries: 5
++      start_period: 5s
+     networks: [banking-net]
+ 
+   # ----------------------------------------- Observabilidad (heredada: ./monitoring) ----
+diff --git a/docker/Dockerfile.node20 b/docker/Dockerfile.node20
+index ead5453..591ae4c 100644
+--- a/docker/Dockerfile.node20
++++ b/docker/Dockerfile.node20
+@@ -1,7 +1,7 @@
+ # syntax=docker/dockerfile:1.7
+ # NestJS (Node.js 20) - multi-stage endurecido.
+ # Contexto de build: raíz del microservicio (package.json, package-lock.json, src/).
+-# Requiere: "npm run build" que genere dist/main.js y package-lock.json versionado.
++# Requiere: "npm run build" que genere dist/src/main.js. Se recomienda versionar package-lock.json.
+ # Uso: scripts/build-image.sh node20 <ruta-del-servicio> <imagen:tag>
+ 
+ ARG NODE_IMAGE=node:20.18.1-alpine3.20
+@@ -9,9 +9,13 @@ ARG NODE_IMAGE=node:20.18.1-alpine3.20
+ # ---------- Etapa 1: dependencias completas (build) ----------
+ FROM ${NODE_IMAGE} AS deps
+ WORKDIR /build
+-COPY package.json package-lock.json ./
++COPY package*.json ./
+ RUN --mount=type=cache,target=/root/.npm \
+-    npm ci --ignore-scripts --no-audit --no-fund
++    if [ -f package-lock.json ]; then \
++        npm ci --ignore-scripts --no-audit --no-fund; \
++    else \
++        npm install --ignore-scripts --no-audit --no-fund; \
++    fi
+ 
+ # ---------- Etapa 2: compilación ----------
+ FROM deps AS build
+@@ -21,9 +25,13 @@ RUN npm run build
+ # ---------- Etapa 3: solo dependencias de producción ----------
+ FROM ${NODE_IMAGE} AS prod-deps
+ WORKDIR /build
+-COPY package.json package-lock.json ./
++COPY package*.json ./
+ RUN --mount=type=cache,target=/root/.npm \
+-    npm ci --omit=dev --ignore-scripts --no-audit --no-fund
++    if [ -f package-lock.json ]; then \
++        npm ci --omit=dev --ignore-scripts --no-audit --no-fund; \
++    else \
++        npm install --production --ignore-scripts --no-audit --no-fund; \
++    fi
+ 
+ # ---------- Etapa 4: runtime ----------
+ FROM ${NODE_IMAGE} AS runtime
+@@ -43,15 +51,14 @@ ENV NODE_ENV=production \
+     HEALTH_PATH=/health \
+     npm_config_cache=/tmp/.npm
+ 
+-# Sin gestores de paquetes en runtime: reduce superficie de ataque.
+ RUN apk upgrade --no-cache \
+  && apk add --no-cache tini \
+  && addgroup -g 10001 -S app \
+  && adduser -S -D -H -u 10001 -G app -s /sbin/nologin app \
+  && rm -rf /usr/local/lib/node_modules/npm \
+-           /usr/local/lib/node_modules/corepack \
+-           /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+-           /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn-v*
++            /usr/local/lib/node_modules/corepack \
++            /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
++            /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn-v*
+ 
+ WORKDIR /app
+ COPY --from=prod-deps --chown=10001:10001 /build/node_modules ./node_modules
+@@ -65,4 +72,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+     CMD ["node", "-e", "fetch('http://127.0.0.1:'+process.env.APP_PORT+process.env.HEALTH_PATH,{signal:AbortSignal.timeout(3000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+ 
+ ENTRYPOINT ["/sbin/tini", "--"]
+-CMD ["node", "dist/main.js"]
++CMD ["node", "dist/src/main.js"]
+\ No newline at end of file
+diff --git a/docker/Dockerfile.python312 b/docker/Dockerfile.python312
+index ff04ed1..2d7edd2 100644
+--- a/docker/Dockerfile.python312
++++ b/docker/Dockerfile.python312
+@@ -1,6 +1,6 @@
+ # syntax=docker/dockerfile:1.7
+ # FastAPI (Python 3.12) - multi-stage endurecido.
+-# Contexto de build: raíz del microservicio (requirements.txt y el paquete "app/").
++# Contexto de build: raíz del microservicio (requirements.txt y main.py).
+ # Requiere: uvicorn en requirements.txt y dependencias disponibles como wheels
+ # (el builder no incluye compiladores a propósito).
+ # Uso: scripts/build-image.sh python312 <ruta-del-servicio> <imagen:tag>
+@@ -39,7 +39,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
+     PATH="/opt/venv/bin:${PATH}" \
+     APP_PORT=${APP_PORT} \
+     HEALTH_PATH=/health \
+-    APP_MODULE=app.main:app
++    APP_MODULE=main:app
+ 
+ RUN apt-get update \
+  && apt-get upgrade -y \
+diff --git a/monitoring/otel-collector-config.yaml b/monitoring/otel-collector-config.yaml
+new file mode 100644
+index 0000000..4a0bacc
+--- /dev/null
++++ b/monitoring/otel-collector-config.yaml
+@@ -0,0 +1,31 @@
++receivers:
++  otlp:
++    protocols:
++      grpc:
++        endpoint: 0.0.0.0:4317
++      http:
++        endpoint: 0.0.0.0:4318
++
++processors:
++  batch:
++
++exporters:
++  debug:
++    verbosity: basic
++  prometheus:
++    endpoint: 0.0.0.0:8889
++
++service:
++  pipelines:
++    traces:
++      receivers: [otlp]
++      processors: [batch]
++      exporters: [debug]
++    metrics:
++      receivers: [otlp]
++      processors: [batch]
++      exporters: [prometheus]
++    logs:
++      receivers: [otlp]
++      processors: [batch]
++      exporters: [debug]
+diff --git a/setup.ps1 b/setup.ps1
+new file mode 100644
+index 0000000..9edebda
+--- /dev/null
++++ b/setup.ps1
+@@ -0,0 +1,9 @@
++$projectRoot = $PSScriptRoot
++$startScript = Join-Path $projectRoot "start.ps1"
++
++if (-not (Test-Path $startScript)) {
++    Write-Error "[ERROR] No se encontró start.ps1 en $projectRoot"
++    exit 1
++}
++
++& $startScript
+diff --git a/start.ps1 b/start.ps1
+new file mode 100644
+index 0000000..dd9497c
+--- /dev/null
++++ b/start.ps1
+@@ -0,0 +1,101 @@
++# start.ps1 - Script de inicio automatizado
++$projectRoot = $PSScriptRoot
++$envFile = Join-Path $projectRoot ".env"
++$envExample = Join-Path $projectRoot ".env.example"
++$composeFile = Join-Path $projectRoot "docker-compose.yml"
++$jwtFile = Join-Path $projectRoot ".dev-jwt"
++$defaultJwtSecret = "cambia-este-secreto-por-uno-de-al-menos-32-caracteres-aleatorios"
++
++Write-Host "==> Verificando archivo .env..." -ForegroundColor Cyan
++if (-not (Test-Path $envFile)) {
++    if (-not (Test-Path $envExample)) {
++        Write-Error "[ERROR] No se encontró .env.example en $projectRoot"
++        exit 1
++    }
++
++    Copy-Item $envExample $envFile
++    Write-Host "[OK] Archivo .env creado a partir de .env.example" -ForegroundColor Green
++}
++
++$envLines = [System.Collections.Generic.List[string]]::new()
++[System.IO.File]::ReadAllLines($envFile) | ForEach-Object { $envLines.Add($_) }
++$jwtSecretLine = -1
++for ($index = 0; $index -lt $envLines.Count; $index++) {
++    if ($envLines[$index] -match '^JWT_SECRET=(.*)$') {
++        $jwtSecretLine = $index
++        break
++    }
++}
++
++$jwtSecret = if ($jwtSecretLine -ge 0) {
++    $envLines[$jwtSecretLine].Substring("JWT_SECRET=".Length)
++} else {
++    ""
++}
++
++if ([string]::IsNullOrWhiteSpace($jwtSecret) -or $jwtSecret -eq $defaultJwtSecret) {
++    $secretBytes = [byte[]]::new(32)
++    $randomGenerator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
++    try {
++        $randomGenerator.GetBytes($secretBytes)
++    } finally {
++        $randomGenerator.Dispose()
++    }
++    $jwtSecret = [Convert]::ToBase64String($secretBytes)
++    $jwtSecretEntry = "JWT_SECRET=$jwtSecret"
++    if ($jwtSecretLine -ge 0) {
++        $envLines[$jwtSecretLine] = $jwtSecretEntry
++    } else {
++        $envLines.Add($jwtSecretEntry)
++    }
++    [System.IO.File]::WriteAllLines($envFile, $envLines, [System.Text.UTF8Encoding]::new($false))
++    Write-Host "[OK] Se generó un JWT_SECRET aleatorio en .env" -ForegroundColor Green
++}
++
++if ([System.Text.Encoding]::UTF8.GetByteCount($jwtSecret) -lt 32) {
++    throw "JWT_SECRET en .env debe tener al menos 32 bytes UTF-8."
++}
++
++if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
++    Write-Error "[ERROR] Docker no está instalado o no está disponible en PATH."
++    exit 1
++}
++
++Write-Host "==> Construyendo servicios y esperando a que estén listos..." -ForegroundColor Cyan
++docker compose --project-directory $projectRoot --env-file $envFile -f $composeFile up --build --detach --wait --wait-timeout 300
++$composeExitCode = $LASTEXITCODE
++if ($composeExitCode -ne 0) {
++    Write-Error "[ERROR] Docker Compose falló (código $composeExitCode). Revisa el estado con 'docker compose ps' y los logs con 'docker compose logs'."
++    exit $composeExitCode
++}
++
++$toBase64Url = {
++    param([byte[]]$Bytes)
++    [Convert]::ToBase64String($Bytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
++}
++$now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
++$jwtHeader = [ordered]@{ alg = "HS256"; typ = "JWT" } | ConvertTo-Json -Compress
++$jwtPayload = [ordered]@{
++    sub = "local-dev"
++    iat = $now
++    exp = $now + 28800
++} | ConvertTo-Json -Compress
++$headerPart = & $toBase64Url ([System.Text.Encoding]::UTF8.GetBytes($jwtHeader))
++$payloadPart = & $toBase64Url ([System.Text.Encoding]::UTF8.GetBytes($jwtPayload))
++$signingInput = "$headerPart.$payloadPart"
++$hmac = [System.Security.Cryptography.HMACSHA256]::new([System.Text.Encoding]::UTF8.GetBytes($jwtSecret))
++try {
++    $signature = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($signingInput))
++} finally {
++    $hmac.Dispose()
++}
++$signaturePart = & $toBase64Url $signature
++$token = "$signingInput.$signaturePart"
++[System.IO.File]::WriteAllText($jwtFile, $token, [System.Text.UTF8Encoding]::new($false))
++
++Write-Host "==> ¡Servicios iniciados y listos!" -ForegroundColor Green
++Write-Host "    - API Gateway / NGINX: http://localhost:8088"
++Write-Host "    - Grafana: http://localhost:3001 (admin / Grafana#Obs2026)"
++Write-Host "    - RabbitMQ Management: http://localhost:15672 (banking / Rabbit#Bus2026)"
++Write-Host "    - JWT local (válido por 8 horas): .dev-jwt"
++Write-Host '    - PowerShell: $jwt = (Get-Content .\.dev-jwt -Raw).Trim()'
+\ No newline at end of file
+-- 
+2.55.0.windows.2
+

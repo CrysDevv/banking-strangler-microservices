@@ -10,7 +10,7 @@ import pika
 from datetime import datetime
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://audit_user:Audit#Pg2026@postgres:5432/audit_db")
-RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://banking:Rabbit#Bus2026@rabbitmq:5672/")
+RABBITMQ_URL = os.getenv("RABBITMQ_URL")
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -44,7 +44,17 @@ def get_db():
 def rabbitmq_consumer():
     while True:
         try:
-            params = pika.URLParameters(RABBITMQ_URL)
+            if RABBITMQ_URL:
+                params = pika.URLParameters(RABBITMQ_URL)
+            else:
+                params = pika.ConnectionParameters(
+                    host=os.getenv("RABBITMQ_HOST", "rabbitmq"),
+                    port=int(os.getenv("RABBITMQ_PORT", "5672")),
+                    credentials=pika.PlainCredentials(
+                        username=os.getenv("RABBITMQ_USER", "banking"),
+                        password=os.getenv("RABBITMQ_PASSWORD", "Rabbit#Bus2026"),
+                    ),
+                )
             connection = pika.BlockingConnection(params)
             channel = connection.channel()
             channel.exchange_declare(exchange='banking.exchange', exchange_type='topic', durable=True)
