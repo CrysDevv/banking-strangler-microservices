@@ -1,0 +1,193 @@
+From 05098650a5eca644dee148233f9423c2b21f1862 Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 13:34:51 -0300
+Subject: [PATCH 2/2] =?UTF-8?q?fix(core):=20ajustar=20seguridad=20y=20endp?=
+ =?UTF-8?q?oints=20para=20validaci=C3=B3n=20de=20integraci=C3=B3n=20E2E?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ services/core-springboot/pom.xml              | 14 +++++-
+ .../banking/core/service/BankingService.java  |  8 +++-
+ .../banking/core/service/OutboxPoller.java    |  4 +-
+ .../core/service/BankingServiceTest.java      | 23 +++++++++
+ .../core/service/OutboxPollerTest.java        | 48 +++++++++++++++++++
+ 5 files changed, 93 insertions(+), 4 deletions(-)
+ create mode 100644 services/core-springboot/src/test/java/com/banking/core/service/BankingServiceTest.java
+ create mode 100644 services/core-springboot/src/test/java/com/banking/core/service/OutboxPollerTest.java
+
+diff --git a/services/core-springboot/pom.xml b/services/core-springboot/pom.xml
+index 8b595ab..e97fc7c 100644
+--- a/services/core-springboot/pom.xml
++++ b/services/core-springboot/pom.xml
+@@ -19,10 +19,22 @@
+ 
+     <properties>
+         <java.version>17</java.version>
+-        <otel.version>1.37.0</otel.version>
++        <otel.version>2.7.0</otel.version>
+         <jjwt.version>0.12.5</jjwt.version>
+     </properties>
+ 
++    <dependencyManagement>
++        <dependencies>
++            <dependency>
++                <groupId>io.opentelemetry</groupId>
++                <artifactId>opentelemetry-bom</artifactId>
++                <version>1.41.0</version>
++                <type>pom</type>
++                <scope>import</scope>
++            </dependency>
++        </dependencies>
++    </dependencyManagement>
++
+     <dependencies>
+         <!-- Spring Boot Starters -->
+         <dependency>
+diff --git a/services/core-springboot/src/main/java/com/banking/core/service/BankingService.java b/services/core-springboot/src/main/java/com/banking/core/service/BankingService.java
+index 1aec6c0..845cded 100644
+--- a/services/core-springboot/src/main/java/com/banking/core/service/BankingService.java
++++ b/services/core-springboot/src/main/java/com/banking/core/service/BankingService.java
+@@ -46,7 +46,7 @@ public class BankingService {
+ 
+                 try (ResultSet rs = stmt.getResultSet()) {
+                     if (rs.next()) {
+-                        UUID transferenciaId = (UUID) rs.getObject("TransferenciaId");
++                        UUID transferenciaId = readUniqueIdentifier(rs, "TransferenciaId");
+                         String estado = rs.getString("Estado");
+                         BigDecimal saldoOrigen = rs.getBigDecimal("SaldoOrigen");
+                         BigDecimal saldoDestino = rs.getBigDecimal("SaldoDestino");
+@@ -101,7 +101,7 @@ public class BankingService {
+                      "ORDER BY m.FechaMovimiento DESC";
+         return jdbcTemplate.query(sql, (rs, rowNum) -> MovimientoDto.builder()
+                 .movimientoId(rs.getLong("MovimientoId"))
+-                .transferenciaId((UUID) rs.getObject("TransferenciaId"))
++                .transferenciaId(readUniqueIdentifier(rs, "TransferenciaId"))
+                 .tipo(rs.getString("Tipo"))
+                 .monto(rs.getBigDecimal("Monto"))
+                 .saldoPosterior(rs.getBigDecimal("SaldoPosterior"))
+@@ -109,4 +109,8 @@ public class BankingService {
+                 .fechaMovimiento(rs.getTimestamp("FechaMovimiento").toLocalDateTime())
+                 .build(), numeroCuenta);
+     }
++
++    static UUID readUniqueIdentifier(ResultSet resultSet, String columnName) throws SQLException {
++        return UUID.fromString(resultSet.getString(columnName));
++    }
+ }
+diff --git a/services/core-springboot/src/main/java/com/banking/core/service/OutboxPoller.java b/services/core-springboot/src/main/java/com/banking/core/service/OutboxPoller.java
+index e59b97f..c9cf2fd 100644
+--- a/services/core-springboot/src/main/java/com/banking/core/service/OutboxPoller.java
++++ b/services/core-springboot/src/main/java/com/banking/core/service/OutboxPoller.java
+@@ -3,6 +3,7 @@ package com.banking.core.service;
+ import com.banking.core.config.RabbitMQConfig;
+ import com.banking.core.model.OutboxEvento;
+ import com.banking.core.repository.OutboxRepository;
++import com.fasterxml.jackson.databind.ObjectMapper;
+ import lombok.RequiredArgsConstructor;
+ import lombok.extern.slf4j.Slf4j;
+ import org.springframework.amqp.rabbit.core.RabbitTemplate;
+@@ -20,6 +21,7 @@ public class OutboxPoller {
+ 
+     private final OutboxRepository outboxRepository;
+     private final RabbitTemplate rabbitTemplate;
++    private final ObjectMapper objectMapper;
+ 
+     @Scheduled(fixedRateString = "${banking.outbox.fixed-rate-ms:3000}")
+     @Transactional
+@@ -36,7 +38,7 @@ public class OutboxPoller {
+                 rabbitTemplate.convertAndSend(
+                         RabbitMQConfig.BANKING_EXCHANGE,
+                         "banking.transferencia.realizada",
+-                        evento.getPayload(),
++                        objectMapper.readTree(evento.getPayload()),
+                         message -> {
+                             if (evento.getCorrelationId() != null) {
+                                 message.getMessageProperties().setHeader("X-Correlation-ID", evento.getCorrelationId());
+diff --git a/services/core-springboot/src/test/java/com/banking/core/service/BankingServiceTest.java b/services/core-springboot/src/test/java/com/banking/core/service/BankingServiceTest.java
+new file mode 100644
+index 0000000..0a3c924
+--- /dev/null
++++ b/services/core-springboot/src/test/java/com/banking/core/service/BankingServiceTest.java
+@@ -0,0 +1,23 @@
++package com.banking.core.service;
++
++import org.junit.jupiter.api.Test;
++
++import java.sql.ResultSet;
++import java.sql.SQLException;
++import java.util.UUID;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++
++class BankingServiceTest {
++
++    @Test
++    void parsesSqlServerUniqueIdentifierReturnedAsString() throws SQLException {
++        UUID expected = UUID.fromString("6b394bf8-9d82-4c8f-a12a-d9ba9d89bd8f");
++        ResultSet resultSet = mock(ResultSet.class);
++        when(resultSet.getString("TransferenciaId")).thenReturn(expected.toString());
++
++        assertEquals(expected, BankingService.readUniqueIdentifier(resultSet, "TransferenciaId"));
++    }
++}
+diff --git a/services/core-springboot/src/test/java/com/banking/core/service/OutboxPollerTest.java b/services/core-springboot/src/test/java/com/banking/core/service/OutboxPollerTest.java
+new file mode 100644
+index 0000000..cdcef21
+--- /dev/null
++++ b/services/core-springboot/src/test/java/com/banking/core/service/OutboxPollerTest.java
+@@ -0,0 +1,48 @@
++package com.banking.core.service;
++
++import com.banking.core.config.RabbitMQConfig;
++import com.banking.core.model.OutboxEvento;
++import com.banking.core.repository.OutboxRepository;
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import org.junit.jupiter.api.Test;
++import org.springframework.amqp.core.MessagePostProcessor;
++import org.springframework.amqp.rabbit.core.RabbitTemplate;
++
++import java.util.List;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++class OutboxPollerTest {
++
++    @Test
++    void publishesOutboxPayloadAsJsonObject() throws Exception {
++        OutboxRepository repository = mock(OutboxRepository.class);
++        RabbitTemplate rabbitTemplate = mock(RabbitTemplate.class);
++        OutboxEvento event = new OutboxEvento();
++        event.setPayload("{\"transferenciaId\":\"transfer-123\"}");
++        event.setIntentos(0);
++
++        when(repository.findPendingEventsForProcessing(50)).thenReturn(List.of(event));
++
++        OutboxPoller poller = new OutboxPoller(repository, rabbitTemplate, new ObjectMapper());
++        poller.pollAndPublishOutboxEvents();
++
++        org.mockito.ArgumentCaptor<Object> payload = org.mockito.ArgumentCaptor.forClass(Object.class);
++        verify(rabbitTemplate).convertAndSend(
++                eq(RabbitMQConfig.BANKING_EXCHANGE),
++                eq("banking.transferencia.realizada"),
++                payload.capture(),
++                any(MessagePostProcessor.class)
++        );
++        assertTrue(payload.getValue() instanceof JsonNode);
++        assertEquals("transfer-123", ((JsonNode) payload.getValue()).path("transferenciaId").asText());
++        assertEquals("PUBLICADO", event.getEstado());
++    }
++}
+-- 
+2.55.0.windows.2
+
