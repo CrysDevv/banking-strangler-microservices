@@ -19,9 +19,21 @@
 
     <properties>
         <java.version>17</java.version>
-        <otel.version>1.37.0</otel.version>
+        <otel.version>2.7.0</otel.version>
         <jjwt.version>0.12.5</jjwt.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.opentelemetry</groupId>
+                <artifactId>opentelemetry-bom</artifactId>
+                <version>1.41.0</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <!-- Spring Boot Starters -->

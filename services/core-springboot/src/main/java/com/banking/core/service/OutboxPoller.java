@@ -3,6 +3,7 @@ package com.banking.core.service;
 import com.banking.core.config.RabbitMQConfig;
 import com.banking.core.model.OutboxEvento;
 import com.banking.core.repository.OutboxRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -20,6 +21,7 @@ public class OutboxPoller {
 
     private final OutboxRepository outboxRepository;
     private final RabbitTemplate rabbitTemplate;
+    private final ObjectMapper objectMapper;
 
     @Scheduled(fixedRateString = "${banking.outbox.fixed-rate-ms:3000}")
     @Transactional
@@ -36,7 +38,7 @@ public class OutboxPoller {
                 rabbitTemplate.convertAndSend(
                         RabbitMQConfig.BANKING_EXCHANGE,
                         "banking.transferencia.realizada",
-                        evento.getPayload(),
+                        objectMapper.readTree(evento.getPayload()),
                         message -> {
                             if (evento.getCorrelationId() != null) {
                                 message.getMessageProperties().setHeader("X-Correlation-ID", evento.getCorrelationId());
