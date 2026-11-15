@@ -3,6 +3,7 @@ generate_fase_*.sh
 
 # --- Secretos y entorno ---
 .env
+.dev-jwt
 
 # --- Logs ---
 *.log
