@@ -55,10 +55,18 @@ BEGIN
     EXEC dbo.sp_EjecutarTransferencia @IdempotencyKey = 'seed-tx-004', @CuentaOrigen = '0000500001', @CuentaDestino = '0000100002', @Monto = 300000,  @Glosa = N'Ahorro mensual',        @CorrelationId = 'seed-0004';
     EXEC dbo.sp_EjecutarTransferencia @IdempotencyKey = 'seed-tx-005', @CuentaOrigen = '0000400001', @CuentaDestino = '0000700001', @Monto = 80000,   @Glosa = N'Pago servicios',        @CorrelationId = 'seed-0005';
 
-    PRINT 'Seed completado: ' + CAST((SELECT COUNT(*) FROM dbo.Clientes)    AS VARCHAR(10)) + ' clientes, '
-                              + CAST((SELECT COUNT(*) FROM dbo.Cuentas)     AS VARCHAR(10)) + ' cuentas, '
-                              + CAST((SELECT COUNT(*) FROM dbo.Movimientos) AS VARCHAR(10)) + ' movimientos, '
-                              + CAST((SELECT COUNT(*) FROM dbo.OutboxEventos) AS VARCHAR(10)) + ' eventos outbox.';
+    DECLARE @ClientesCount INT, @CuentasCount INT, @MovimientosCount INT, @OutboxCount INT;
+    SELECT @ClientesCount = COUNT(*) FROM dbo.Clientes;
+    SELECT @CuentasCount = COUNT(*) FROM dbo.Cuentas;
+    SELECT @MovimientosCount = COUNT(*) FROM dbo.Movimientos;
+    SELECT @OutboxCount = COUNT(*) FROM dbo.OutboxEventos;
+
+    PRINT CONCAT(
+        'Seed completado: ', @ClientesCount, ' clientes, ',
+        @CuentasCount, ' cuentas, ',
+        @MovimientosCount, ' movimientos, ',
+        @OutboxCount, ' eventos outbox.'
+    );
 END
 ELSE
     PRINT 'Seed omitido: la base ya contiene datos.';

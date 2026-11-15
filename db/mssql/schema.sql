@@ -41,6 +41,17 @@ END
 GO
 
 /* ------------------------- RUT chileno (modulo 11) ------------------------- */
+IF OBJECT_ID(N'dbo.Clientes', N'U') IS NOT NULL
+   AND EXISTS
+       (SELECT 1
+          FROM sys.check_constraints
+         WHERE parent_object_id = OBJECT_ID(N'dbo.Clientes')
+           AND name = N'CK_Clientes_Rut')
+BEGIN
+    ALTER TABLE dbo.Clientes DROP CONSTRAINT CK_Clientes_Rut;
+END
+GO
+
 CREATE OR ALTER FUNCTION dbo.fn_CalcularDvRut (@Cuerpo INT)
 RETURNS CHAR(1)
 AS
@@ -87,6 +98,18 @@ BEGIN
         Telefono       VARCHAR(20)   NULL,
         FechaCreacion  DATETIME2(3)  NOT NULL CONSTRAINT DF_Clientes_Fecha DEFAULT SYSUTCDATETIME()
     );
+END
+GO
+
+IF OBJECT_ID(N'dbo.Clientes', N'U') IS NOT NULL
+   AND NOT EXISTS
+       (SELECT 1
+          FROM sys.check_constraints
+         WHERE parent_object_id = OBJECT_ID(N'dbo.Clientes')
+           AND name = N'CK_Clientes_Rut')
+BEGIN
+    ALTER TABLE dbo.Clientes WITH CHECK
+        ADD CONSTRAINT CK_Clientes_Rut CHECK (dbo.fn_ValidarRut(Rut) = 1);
 END
 GO
 
