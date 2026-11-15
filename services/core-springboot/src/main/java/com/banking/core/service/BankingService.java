@@ -46,7 +46,7 @@ public class BankingService {
 
                 try (ResultSet rs = stmt.getResultSet()) {
                     if (rs.next()) {
-                        UUID transferenciaId = (UUID) rs.getObject("TransferenciaId");
+                        UUID transferenciaId = readUniqueIdentifier(rs, "TransferenciaId");
                         String estado = rs.getString("Estado");
                         BigDecimal saldoOrigen = rs.getBigDecimal("SaldoOrigen");
                         BigDecimal saldoDestino = rs.getBigDecimal("SaldoDestino");
@@ -101,12 +101,16 @@ public class BankingService {
                      "ORDER BY m.FechaMovimiento DESC";
         return jdbcTemplate.query(sql, (rs, rowNum) -> MovimientoDto.builder()
                 .movimientoId(rs.getLong("MovimientoId"))
-                .transferenciaId((UUID) rs.getObject("TransferenciaId"))
+                .transferenciaId(readUniqueIdentifier(rs, "TransferenciaId"))
                 .tipo(rs.getString("Tipo"))
                 .monto(rs.getBigDecimal("Monto"))
                 .saldoPosterior(rs.getBigDecimal("SaldoPosterior"))
                 .glosa(rs.getString("Glosa"))
                 .fechaMovimiento(rs.getTimestamp("FechaMovimiento").toLocalDateTime())
                 .build(), numeroCuenta);
+    }
+
+    static UUID readUniqueIdentifier(ResultSet resultSet, String columnName) throws SQLException {
+        return UUID.fromString(resultSet.getString(columnName));
     }
 }
