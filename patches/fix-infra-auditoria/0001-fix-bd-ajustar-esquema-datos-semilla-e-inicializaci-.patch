@@ -1,0 +1,85 @@
+From 22e61199185c840a15f29308cf6185e0320c88bd Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 13:37:16 -0300
+Subject: [PATCH 1/4] =?UTF-8?q?fix(bd):=20ajustar=20esquema,=20datos=20sem?=
+ =?UTF-8?q?illa=20e=20inicializaci=C3=B3n=20de=20ms=20sql=20server?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ db/mssql/schema.sql | 23 +++++++++++++++++++++++
+ db/mssql/seed.sql   | 16 ++++++++++++----
+ 2 files changed, 35 insertions(+), 4 deletions(-)
+
+diff --git a/db/mssql/schema.sql b/db/mssql/schema.sql
+index ac4c963..b44744d 100644
+--- a/db/mssql/schema.sql
++++ b/db/mssql/schema.sql
+@@ -41,6 +41,17 @@ END
+ GO
+ 
+ /* ------------------------- RUT chileno (modulo 11) ------------------------- */
++IF OBJECT_ID(N'dbo.Clientes', N'U') IS NOT NULL
++   AND EXISTS
++       (SELECT 1
++          FROM sys.check_constraints
++         WHERE parent_object_id = OBJECT_ID(N'dbo.Clientes')
++           AND name = N'CK_Clientes_Rut')
++BEGIN
++    ALTER TABLE dbo.Clientes DROP CONSTRAINT CK_Clientes_Rut;
++END
++GO
++
+ CREATE OR ALTER FUNCTION dbo.fn_CalcularDvRut (@Cuerpo INT)
+ RETURNS CHAR(1)
+ AS
+@@ -90,6 +101,18 @@ BEGIN
+ END
+ GO
+ 
++IF OBJECT_ID(N'dbo.Clientes', N'U') IS NOT NULL
++   AND NOT EXISTS
++       (SELECT 1
++          FROM sys.check_constraints
++         WHERE parent_object_id = OBJECT_ID(N'dbo.Clientes')
++           AND name = N'CK_Clientes_Rut')
++BEGIN
++    ALTER TABLE dbo.Clientes WITH CHECK
++        ADD CONSTRAINT CK_Clientes_Rut CHECK (dbo.fn_ValidarRut(Rut) = 1);
++END
++GO
++
+ /* -------------------------------- Cuentas ---------------------------------- */
+ IF OBJECT_ID(N'dbo.Cuentas', N'U') IS NULL
+ BEGIN
+diff --git a/db/mssql/seed.sql b/db/mssql/seed.sql
+index a6f600d..dde9dfc 100644
+--- a/db/mssql/seed.sql
++++ b/db/mssql/seed.sql
+@@ -55,10 +55,18 @@ BEGIN
+     EXEC dbo.sp_EjecutarTransferencia @IdempotencyKey = 'seed-tx-004', @CuentaOrigen = '0000500001', @CuentaDestino = '0000100002', @Monto = 300000,  @Glosa = N'Ahorro mensual',        @CorrelationId = 'seed-0004';
+     EXEC dbo.sp_EjecutarTransferencia @IdempotencyKey = 'seed-tx-005', @CuentaOrigen = '0000400001', @CuentaDestino = '0000700001', @Monto = 80000,   @Glosa = N'Pago servicios',        @CorrelationId = 'seed-0005';
+ 
+-    PRINT 'Seed completado: ' + CAST((SELECT COUNT(*) FROM dbo.Clientes)    AS VARCHAR(10)) + ' clientes, '
+-                              + CAST((SELECT COUNT(*) FROM dbo.Cuentas)     AS VARCHAR(10)) + ' cuentas, '
+-                              + CAST((SELECT COUNT(*) FROM dbo.Movimientos) AS VARCHAR(10)) + ' movimientos, '
+-                              + CAST((SELECT COUNT(*) FROM dbo.OutboxEventos) AS VARCHAR(10)) + ' eventos outbox.';
++    DECLARE @ClientesCount INT, @CuentasCount INT, @MovimientosCount INT, @OutboxCount INT;
++    SELECT @ClientesCount = COUNT(*) FROM dbo.Clientes;
++    SELECT @CuentasCount = COUNT(*) FROM dbo.Cuentas;
++    SELECT @MovimientosCount = COUNT(*) FROM dbo.Movimientos;
++    SELECT @OutboxCount = COUNT(*) FROM dbo.OutboxEventos;
++
++    PRINT CONCAT(
++        'Seed completado: ', @ClientesCount, ' clientes, ',
++        @CuentasCount, ' cuentas, ',
++        @MovimientosCount, ' movimientos, ',
++        @OutboxCount, ' eventos outbox.'
++    );
+ END
+ ELSE
+     PRINT 'Seed omitido: la base ya contiene datos.';
+-- 
+2.55.0.windows.2
+
