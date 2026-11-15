@@ -1,15 +1,11 @@
-```markdown
 # Banking Strangler Microservices
 
-> Una arquitectura de referencia orientada a eventos y basada en microservicios para la modernización de sistemas bancarios core mediante el patrón **Strangler Fig (Estrangulamiento)**.
+> Arquitectura de referencia orientada a eventos para modernizar un core bancario monolítico mediante el patrón **Strangler Fig** —sin detener la operación ni perder trazabilidad transaccional.
 
----
-
-## 📋 Tabla de Contenidos
 - [Contexto y Problemática](#-contexto-y-problemática)
 - [Arquitectura de la Solución](#-arquitectura-de-la-solución)
-- [Patrones de Diseño Aplicados](#-patrones-de-diseño-aplicados)
 - [Componentes del Sistema](#-componentes-del-sistema)
+- [Patrones de Diseño Aplicados](#-patrones-de-diseño-aplicados)
 - [Tecnologías y Stack](#-tecnologías-y-stack)
 - [Puesta en Marcha (Quick Start)](#-puesta-en-marcha-quick-start)
 - [Estrategia de Migración y Rollback](#-estrategia-de-migración-y-rollback)
@@ -18,90 +14,114 @@
 
 ## 🎯 Contexto y Problemática
 
-Los sistemas core bancarios tradicionales (*legacies*) suelen ser monolitos rígidos, acoplados y difíciles de escalar. Realizar cambios o lanzar nuevos productos financieros toma meses debido al alto riesgo de interrupción. 
+Los sistemas bancarios tradicionales (*legacy*) suelen crecer como monolitos rígidos: tocar un módulo implica riesgo operativo y desplegar funcionalidades nuevas tarda meses.
 
-Este proyecto demuestra cómo desacoplar un monolito financiero de forma incremental utilizando el **Patrón Strangler Fig**, asegurando:
-* **Cero tiempo de inactividad (Zero Downtime):** La plataforma permanece disponible continuamente durante la migración.
-* **Mitigación de riesgos:** Los módulos se reemplazan por dominio de negocio (cuentas, transacciones, clientes) uno por uno.
-* **Reversibilidad:** Cada etapa de migración cuenta con mecanismos para redirigir el tráfico al sistema heredado en caso de anomalías.
+Este repositorio implementa una transición gradual mediante **estrangulamiento (Strangler Fig)** bajo tres principios:
+
+* **Zero Downtime:** la plataforma sigue operando mientras se migran capacidades de negocio.
+* **Aislamiento por dominio:** cuentas, transacciones y clientes se desacoplan uno a uno hacia servicios independientes.
+* **Reversibilidad inmediata:** cada ruta migrada puede volver al monolito si aparecen anomalías en producción.
 
 ---
 
 ## 🏗️ Arquitectura de la Solución
 
-El sistema se compone de una fachada inteligente que actúa como punto de entrada único, aislando a los clientes de los cambios internos en el backend:
+Una fachada inteligente actúa como punto único de entrada y oculta a los clientes dónde se procesa cada petición:
 
-1. **API Façade / Gateway (NGINX):** Intercepta todas las peticiones entrantes. Decide de manera dinámica si la petición debe dirigirse al Monolito Legacy o al nuevo ecosistema de microservicios.
-2. **Dominio Desacoplado:** Los nuevos servicios se construyen bajo los principios de *Domain-Driven Design (DDD)*, utilizando bases de datos independientes por servicio (*Database-per-service pattern*).
-3. **Comunicación Asíncrona (Event-Driven):** Los eventos de negocio críticos se propagan mediante un broker de mensajes (RabbitMQ) para desacoplar las operaciones financieras.
+```text
+                       ┌─────────────────────────────┐
+                       │     Clientes / Frontend     │
+                       └──────────────┬──────────────┘
+                                      │ HTTP / REST (JWT)
+                                      ▼
+                       ┌─────────────────────────────┐
+                       │  API Façade / NGINX (:8088) │
+                       └───┬─────────────────────┬───┘
+          Tráfico Legacy   │                     │   Tráfico Migrado
+        ┌──────────────────┘                     └──────────────────┐
+        ▼                                                           ▼
+┌───────────────┐                                      ┌─────────────────────────┐
+│   Monolito    │                                      │  BFF (NestJS)           │
+│    Legacy     │                                      │  Core (Spring Boot)     │
+│ (MS SQL Srv)  │                                      │  Auditoría (FastAPI)    │
+└───────────────┘                                      └────────────┬────────────┘
+                                                                    │ Outbox / Eventos
+                                                                    ▼
+                                                       ┌─────────────────────────┐
+                                                       │ RabbitMQ / Kafka        │
+                                                       │ + PostgreSQL (per-svc)  │
+                                                       └─────────────────────────┘
+```
 
----
-
-## 🧩 Patrones de Diseño Aplicados
-
-* **Strangler Fig Pattern:** Interceptación gradual de funcionalidades del monolito hacia microservicios independientes.
-* **API Façade / Gateway Routing:** Enrutamiento transparente para los clientes externos.
-* **Transactional Outbox Pattern:** Garantiza la consistencia de datos entre la base de datos transaccional y el envío de eventos al message broker.
-* **Idempotency:** Clave para asegurar que reintentos de peticiones financieras no dupliquen cargos o abonos.
+1. **API Façade / Gateway (NGINX):** intercepta el tráfico entrante y decide de forma dinámica qué rutas van al monolito y cuáles al ecosistema nuevo.
+2. **Dominios desacoplados:** los nuevos servicios siguen *Domain-Driven Design (DDD)* con almacenamiento independiente (*Database-per-service*).
+3. **Mensajería asíncrona:** los eventos financieros críticos viajan por un broker (RabbitMQ / Kafka) para evitar acoplamiento temporal entre servicios.
 
 ---
 
 ## 📦 Componentes del Sistema
 
-| Componente | Descripción | Estado / Rol |
+| Componente | Responsabilidad | Acceso / Estado |
 | :--- | :--- | :--- |
-| **API Gateway / NGINX** | Enrutador de peticiones y punto de terminación de seguridad. | `http://localhost:8088` |
-| **Grafana / Observabilidad** | Monitoreo y métricas del sistema. | `http://localhost:3001` |
-| **RabbitMQ Management** | Gestión y monitoreo de colas y mensajería asíncrona. | `http://localhost:15672` |
-| **BFF (NestJS) & Core (Spring Boot)** | Orquestación y lógica de negocio principal. | Microservicios Activos |
+| **API Gateway (NGINX)** | Enrutamiento dinámico, fachada única y borde de seguridad. | `http://localhost:8088` |
+| **BFF (NestJS)** | Orquestación de respuestas y adaptación para clientes. | Servicio activo |
+| **Core Bancario (Spring Boot)** | Lógica de negocio principal y persistencia transaccional. | Servicio activo |
+| **Auditoría (FastAPI)** | Registro y trazabilidad de operaciones críticas. | Servicio activo |
+| **RabbitMQ Management** | Gestión de colas, intercambios y mensajería asíncrona. | `http://localhost:15672` |
+| **Grafana** | Paneles de observabilidad, métricas y salud del clúster. | `http://localhost:3001` |
+
+---
+
+## 🧩 Patrones de Diseño Aplicados
+
+| Patrón | Propósito en el sistema |
+| :--- | :--- |
+| **Strangler Fig** | Sustitución progresiva de rutas del monolito sin reescrituras masivas. |
+| **API Façade / Gateway Routing** | Desacopla la interfaz pública de la topología interna de servicios. |
+| **Transactional Outbox** | Asegura consistencia atómica entre el guardado en base de datos y la publicación del evento. |
+| **Idempotency** | Evita cargos o abonos duplicados ante reintentos de red en operaciones financieras. |
 
 ---
 
 ## 🛠️ Tecnologías y Stack
 
-* **Backend / Microservicios:** Java 17 (Spring Boot), TypeScript (NestJS - BFF), Python 3.12 (FastAPI - Auditoría).
-* **Mensajería & Streaming:** RabbitMQ / Apache Kafka.
-* **Contenedores y Orquestación:** Docker / Docker Compose.
+* **Backend y Microservicios:** Java 17 (Spring Boot), TypeScript (NestJS), Python 3.12 (FastAPI).
+* **Mensajería y Streaming:** RabbitMQ, Apache Kafka.
 * **Bases de Datos:** MS SQL Server, PostgreSQL.
+* **Infraestructura:** Docker, Docker Compose, NGINX, Grafana.
 
 ---
 
 ## 🚀 Puesta en Marcha (Quick Start)
 
 ### Prerrequisitos
-* Docker y Docker Compose ejecutándose en tu máquina.
-* PowerShell (recomendado para entorno Windows).
+* **Docker** y **Docker Compose** activos en el equipo.
+* **PowerShell** (entorno recomendado en Windows para los scripts de automatización).
 
-### Pasos de ejecución
-1. **Clonar el repositorio:**
-   ```bash
-   git clone [https://github.com/CrysDevv/banking-strangler-microservices.git](https://github.com/CrysDevv/banking-strangler-microservices.git)
-   cd banking-strangler-microservices
+### Ejecución local
 
+1. **Clonar el repositorio y entrar al directorio:**
+
+```bash
+git clone [https://github.com/CrysDevv/banking-strangler-microservices.git](https://github.com/CrysDevv/banking-strangler-microservices.git)
+cd banking-strangler-microservices
 ```
 
-2. **Ejecutar el script de inicio en PowerShell:**
+2. **Levantar los contenedores e inicializar el entorno:**
+
 ```powershell
 .\start.ps1
-
 ```
 
+3. **Cargar el token JWT local para probar endpoints protegidos:**
 
-3. **Cargar el token JWT para pruebas locales:**
 ```powershell
 $jwt = (Get-Content .\.dev-jwt -Raw).Trim()
-
 ```
-
-
 
 ---
 
 ## 🔄 Estrategia de Migración y Rollback
 
-1. **Feature Flags de Enrutamiento:** El Gateway conmuta de forma controlada porcentajes de tráfico hacia los microservicios modernos.
-2. **Plan de Reversión:** Si la tasa de errores supera los umbrales definidos, el enrutamiento se reconfigura instantáneamente hacia el monolito sin pérdida de datos gracias a la sincronización transitoria.
-
-```
-
-```
+* **Conmutación progresiva:** el Gateway controla mediante reglas de enrutamiento qué porcentaje o tipo de peticiones pasan a los microservicios.
+* **Reversión instantánea:** si la tasa de error o latencia supera el umbral esperado, NGINX redirige el tráfico de vuelta al monolito sin pérdida de datos gracias a la sincronización transitoria.
