@@ -4,6 +4,7 @@ import { TerminusModule } from '@nestjs/terminus';
 import { RedisService } from './modules/redis/redis.service';
 import { BankingBffService } from './modules/banking/banking.service';
 import { BankingBffController } from './modules/banking/banking.controller';
+import { HealthController } from './modules/health/health.controller';
 import { CorrelationIdMiddleware } from './common/interceptors/correlation-id.middleware';
 
 @Module({
@@ -11,7 +12,7 @@ import { CorrelationIdMiddleware } from './common/interceptors/correlation-id.mi
     ConfigModule.forRoot({ isGlobal: true }),
     TerminusModule,
   ],
-  controllers: [BankingBffController],
+  controllers: [BankingBffController, HealthController],
   providers: [RedisService, BankingBffService],
 })
 export class AppModule implements NestModule {

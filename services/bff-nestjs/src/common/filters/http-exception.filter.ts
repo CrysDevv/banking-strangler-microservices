@@ -11,15 +11,25 @@ export class HttpExceptionFilter implements ExceptionFilter {
 
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
     let title = 'Error Interno del Servidor';
-    let detail = 'Ocurrió un error inesperado en el BFF.';
-    let errorCode = 'INTERNAL_ERROR';
+    let detail: unknown = 'Ocurrió un error inesperado en el BFF.';
+    let errorCode: string | number = 'INTERNAL_ERROR';
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
-      const errorResponse: any = exception.getResponse();
-      title = exception.name;
-      detail = typeof errorResponse === 'object' && errorResponse.message ? errorResponse.message : exception.message;
-      errorCode = typeof errorResponse === 'object' && errorResponse.error ? errorResponse.error : 'HTTP_EXCEPTION';
+      const errorResponse = exception.getResponse();
+      if (typeof errorResponse === 'object' && errorResponse !== null) {
+        const problem = errorResponse as Record<string, unknown>;
+        title = typeof problem.title === 'string' ? problem.title : exception.name;
+        detail = problem.message ?? problem.detail ?? exception.message;
+        errorCode =
+          typeof problem.errorCode === 'string' || typeof problem.errorCode === 'number'
+            ? problem.errorCode
+            : typeof problem.error === 'string'
+              ? problem.error
+              : 'HTTP_EXCEPTION';
+      } else {
+        detail = typeof errorResponse === 'string' ? errorResponse : exception.message;
+      }
     } else if (exception instanceof Error) {
       detail = exception.message;
     }
@@ -28,7 +38,11 @@ export class HttpExceptionFilter implements ExceptionFilter {
       type: 'https://api.banking.com/errors/bff-error',
       title: title,
       status: status,
-      detail: Array.isArray(detail) ? detail.join(', ') : detail,
+      detail: Array.isArray(detail)
+        ? detail.join(', ')
+        : typeof detail === 'string'
+          ? detail
+          : JSON.stringify(detail) ?? String(detail),
       instance: request.url,
       errorCode: errorCode,
       correlationId: correlationId,
