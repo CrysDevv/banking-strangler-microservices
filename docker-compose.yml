@@ -190,6 +190,7 @@ services:
       - "8088:80"
     volumes:
       - ./gateway-nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend-angular:/usr/share/nginx/html:ro
     depends_on:
       bff-nestjs:
         condition: service_healthy

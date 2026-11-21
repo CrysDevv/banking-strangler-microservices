@@ -63,6 +63,7 @@ Una fachada inteligente actúa como punto único de entrada y oculta a los clien
 
 | Componente | Responsabilidad | Acceso / Estado |
 | :--- | :--- | :--- |
+| **Interfaz Web (Nord)** | Resumen de cuentas, movimientos y transferencias de prueba. | `http://localhost:8088` |
 | **API Gateway (NGINX)** | Enrutamiento dinámico, fachada única y borde de seguridad. | `http://localhost:8088` |
 | **BFF (NestJS)** | Orquestación de respuestas y adaptación para clientes. | Servicio activo |
 | **Core Bancario (Spring Boot)** | Lógica de negocio principal y persistencia transaccional. | Servicio activo |
@@ -118,6 +119,8 @@ cd banking-strangler-microservices
 ```powershell
 $jwt = (Get-Content .\.dev-jwt -Raw).Trim()
 ```
+
+4. **Abrir la interfaz bancaria:** visita `http://localhost:8088`, selecciona **Conectar cuenta** y pega el contenido de `.dev-jwt`. El cliente de prueba inicial es el ID `1`.
 
 ---
 

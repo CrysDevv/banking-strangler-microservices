@@ -111,6 +111,7 @@ public class BankingService {
     }
 
     static UUID readUniqueIdentifier(ResultSet resultSet, String columnName) throws SQLException {
-        return UUID.fromString(resultSet.getString(columnName));
+        String value = resultSet.getString(columnName);
+        return value == null ? null : UUID.fromString(value);
     }
 }
